@@ -20,6 +20,13 @@ project(QPL VERSION 1.8.0 LANGUAGES C CXX
     DESCRIPTION "A library to provide high-performance query processing operations on Intel CPUs."
 )
 
+# Set default build type to release
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    message(STATUS "Setting build type to 'Release' as none was specified.")
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+endif()
+
 # This specify the build version
 set(QPL_SHARED_LIB_VERSION   ${PROJECT_VERSION})
 # This is the indicator for the API and ABI compatibility.
@@ -27,7 +34,6 @@ set(QPL_SHARED_LIB_SOVERSION ${PROJECT_VERSION_MAJOR})
 
 set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/overrides.cmake")
 
-set(CMAKE_VERBOSE_MAKEFILE OFF)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules")
 set(CMAKE_EXPORT_PACKAGE_REGISTRY ON)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
