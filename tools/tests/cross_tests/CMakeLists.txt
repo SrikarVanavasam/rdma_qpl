@@ -31,5 +31,3 @@ set_target_properties(cross_tests PROPERTIES CXX_STANDARD 17)
 
 target_compile_definitions(cross_tests PRIVATE $<TARGET_PROPERTY:tests_common,COMPILE_DEFINITIONS>)
 target_compile_options(cross_tests PRIVATE $<TARGET_PROPERTY:tests_common,COMPILE_OPTIONS>)
-
-install(TARGETS cross_tests RUNTIME DESTINATION bin)

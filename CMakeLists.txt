@@ -161,6 +161,10 @@ add_subdirectory(sources)
 option(QPL_BUILD_EXAMPLES "Builds examples" ON)
 option(QPL_BUILD_TESTS "Builds tests and benchmarks framework" ON)
 
+if (QPL_BUILD_TESTS)
+    enable_testing()
+endif ()
+
 # Print user's settings
 message(STATUS "Build with examples: ${QPL_BUILD_EXAMPLES}")
 message(STATUS "Build with tests and benchmarks framework: ${QPL_BUILD_TESTS}")

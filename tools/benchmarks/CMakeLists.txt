@@ -38,6 +38,3 @@ target_include_directories(qpl_benchmarks
     PRIVATE ${GBENCH_SOURCE_DIR})
 
 target_compile_options(qpl_benchmarks PUBLIC -Wall)
-
-install(TARGETS qpl_benchmarks RUNTIME DESTINATION bin)
-
