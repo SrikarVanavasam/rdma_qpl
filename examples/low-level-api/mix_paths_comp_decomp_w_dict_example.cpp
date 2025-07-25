@@ -72,8 +72,8 @@ auto create_dictionary(qpl_path_t execution_path, const std::vector<uint8_t>& so
 }
 
 // Dynamic Dictionary Compression with defined path
-uint32_t compression(qpl_path_t execution_path, std::vector<uint8_t>& source, std::vector<uint8_t>& destination,
-                     qpl_dictionary* dictionary_ptr) {
+auto compression(qpl_path_t execution_path, std::vector<uint8_t>& source, std::vector<uint8_t>& destination,
+                 qpl_dictionary* dictionary_ptr) -> qpl_status {
     std::unique_ptr<uint8_t[]> job_buffer;
     uint32_t                   job_size = 0U;
 
@@ -81,7 +81,7 @@ uint32_t compression(qpl_path_t execution_path, std::vector<uint8_t>& source, st
     qpl_status status = qpl_get_job_size(execution_path, &job_size);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during job size getting.\n";
-        return 1;
+        return status;
     }
 
     job_buffer   = std::make_unique<uint8_t[]>(job_size);
@@ -89,7 +89,7 @@ uint32_t compression(qpl_path_t execution_path, std::vector<uint8_t>& source, st
     status       = qpl_init_job(execution_path, job);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during compression job initializing.\n";
-        return 1;
+        return status;
     }
 
     std::cout << "Job was successfully initialized.\n";
@@ -116,7 +116,7 @@ uint32_t compression(qpl_path_t execution_path, std::vector<uint8_t>& source, st
 
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during compression.\n";
-        return 1;
+        return status;
     }
 
     const uint32_t compressed_size = job->total_out;
@@ -125,7 +125,7 @@ uint32_t compression(qpl_path_t execution_path, std::vector<uint8_t>& source, st
     status = qpl_fini_job(job);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during job finalization.\n";
-        return 1;
+        return status;
     }
 
     // Update destination size
@@ -138,12 +138,12 @@ uint32_t compression(qpl_path_t execution_path, std::vector<uint8_t>& source, st
               << " path.\n";
     //NOLINTEND(readability-avoid-nested-conditional-operator)
 
-    return 0;
+    return QPL_STS_OK;
 }
 
 // Decompression with software_path
 auto sw_decompression(std::vector<uint8_t>& destination, std::vector<uint8_t>& reference,
-                      qpl_dictionary* dictionary_ptr) {
+                      qpl_dictionary* dictionary_ptr) -> qpl_status {
     std::unique_ptr<uint8_t[]> job_buffer;
     uint32_t                   job_size = 0U;
 
@@ -154,7 +154,7 @@ auto sw_decompression(std::vector<uint8_t>& destination, std::vector<uint8_t>& r
     qpl_status status = qpl_get_job_size(qpl_path_software, &job_size);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during job size getting.\n";
-        return 1;
+        return status;
     }
 
     job_buffer   = std::make_unique<uint8_t[]>(job_size);
@@ -162,7 +162,7 @@ auto sw_decompression(std::vector<uint8_t>& destination, std::vector<uint8_t>& r
     status       = qpl_init_job(qpl_path_software, job);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during compression job initializing.\n";
-        return 1;
+        return status;
     }
 
     // Performing a decompression operation with the same dictionary used for compression
@@ -178,19 +178,19 @@ auto sw_decompression(std::vector<uint8_t>& destination, std::vector<uint8_t>& r
     status = qpl_execute_job(job);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during decompression.\n";
-        return 1;
+        return status;
     }
 
     // Freeing resources
     status = qpl_fini_job(job);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during job finalization.\n";
-        return 1;
+        return status;
     }
 
     std::cout << "Content was successfully decompressed with dictionary.\n";
 
-    return 0;
+    return QPL_STS_OK;
 }
 
 auto main(int argc, char** argv) -> int {
@@ -222,16 +222,12 @@ auto main(int argc, char** argv) -> int {
         auto dictionary_ptr = reinterpret_cast<qpl_dictionary*>(dictionary_buffer.get());
 
         // Compression and check if compression failed
-        const uint8_t comp_status = compression(execution_path, source, destination, dictionary_ptr);
-        if (comp_status == QPL_STS_NOT_SUPPORTED_MODE_ERR) {
-            return 0;
-        } else if (comp_status != 0) {
-            return comp_status;
-        }
+        const auto comp_status = compression(execution_path, source, destination, dictionary_ptr);
+        if (comp_status != QPL_STS_OK) { return comp_status; }
 
         // Decompression with software_path and check if decompression failed
-        const uint8_t decomp_status = sw_decompression(destination, reference, dictionary_ptr);
-        if (decomp_status != 0) { return decomp_status; }
+        const auto decomp_status = sw_decompression(destination, reference, dictionary_ptr);
+        if (decomp_status != QPL_STS_OK) { return decomp_status; }
 
         // Compare source and reference
         for (size_t i = 0; i < source.size(); i++) {
