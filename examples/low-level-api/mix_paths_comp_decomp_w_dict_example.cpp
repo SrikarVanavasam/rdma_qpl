@@ -30,7 +30,7 @@
 constexpr const uint32_t source_size = 2048U;
 
 // Create dictionary with defined path
-uint8_t create_dictionary(qpl_path_t execution_path, std::vector<uint8_t>& source, qpl_dictionary** dictionary_ptr) {
+auto create_dictionary(qpl_path_t execution_path, const std::vector<uint8_t>& source) -> std::unique_ptr<uint8_t[]> {
     std::size_t          dictionary_buffer_size = 0;
     sw_compression_level sw_compr_level         = sw_compression_level::SW_NONE;
     hw_compression_level hw_compr_level         = hw_compression_level::HW_NONE;
@@ -56,28 +56,19 @@ uint8_t create_dictionary(qpl_path_t execution_path, std::vector<uint8_t>& sourc
     dictionary_buffer_size = qpl_get_dictionary_size(sw_compr_level, hw_compr_level, raw_dict_size);
 
     // Allocate memory for the dictionary
-    *dictionary_ptr = (qpl_dictionary*)malloc(dictionary_buffer_size); //NOLINT(cppcoreguidelines-no-malloc)
-
-    if (*dictionary_ptr == nullptr) {
-        std::cout << "Failed to allocate memory for the dictionary.\n";
-        return 1; // Memory allocation failed
-    }
+    auto dictionary_buffer = std::make_unique<uint8_t[]>(dictionary_buffer_size);
+    auto dictionary_ptr    = reinterpret_cast<qpl_dictionary*>(dictionary_buffer.get());
 
     // Build the dictionary
     const qpl_status status =
-            qpl_build_dictionary(*dictionary_ptr, sw_compr_level, hw_compr_level, raw_dict_ptr, raw_dict_size);
+            qpl_build_dictionary(dictionary_ptr, sw_compr_level, hw_compr_level, raw_dict_ptr, raw_dict_size);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " occurred during dictionary building.\n";
-
-        // Clean up allocated memory
-        free(*dictionary_ptr); //NOLINT(cppcoreguidelines-no-malloc)
-        *dictionary_ptr = nullptr;
-
-        return 1;
+        return nullptr;
     }
 
     std::cout << "Dictionary was successfully built.\n";
-    return 0;
+    return dictionary_buffer;
 }
 
 // Dynamic Dictionary Compression with defined path
@@ -225,34 +216,22 @@ auto main(int argc, char** argv) -> int {
         std::vector<uint8_t> destination(compression_size, 4);
         std::vector<uint8_t> reference(source_size, 7);
 
-        // Dictionary initialization
-        qpl_dictionary* dictionary_ptr = nullptr;
-
-        // Build dictionary and check if building failed
-        if (create_dictionary(execution_path, source, &dictionary_ptr) != 0) { return 1; }
+        // Initialize dictionary, build it and check if building failed
+        auto dictionary_buffer = create_dictionary(execution_path, source);
+        if (!dictionary_buffer) { return 1; }
+        auto dictionary_ptr = reinterpret_cast<qpl_dictionary*>(dictionary_buffer.get());
 
         // Compression and check if compression failed
         const uint8_t comp_status = compression(execution_path, source, destination, dictionary_ptr);
         if (comp_status == QPL_STS_NOT_SUPPORTED_MODE_ERR) {
-            // Free dictionary
-            free(dictionary_ptr); //NOLINT(cppcoreguidelines-no-malloc)
             return 0;
         } else if (comp_status != 0) {
-            // Free dictionary
-            free(dictionary_ptr); //NOLINT(cppcoreguidelines-no-malloc)
             return comp_status;
         }
 
         // Decompression with software_path and check if decompression failed
         const uint8_t decomp_status = sw_decompression(destination, reference, dictionary_ptr);
-        if (decomp_status != 0) {
-            // Free dictionary
-            free(dictionary_ptr); //NOLINT(cppcoreguidelines-no-malloc)
-            return decomp_status;
-        }
-
-        // Free dictionary
-        free(dictionary_ptr); //NOLINT(cppcoreguidelines-no-malloc)
+        if (decomp_status != 0) { return decomp_status; }
 
         // Compare source and reference
         for (size_t i = 0; i < source.size(); i++) {
