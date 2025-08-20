@@ -10,6 +10,8 @@
 
 #include "qpl/qpl.h"
 
+#include "filtering_fuzz_common.hpp"
+
 #ifndef QPL_EXECUTION_PATH
 #define QPL_EXECUTION_PATH qpl_path_software
 #endif
@@ -34,23 +36,31 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, size_t Size) {
     Size--;
 
     if (Size > sizeof(expand_properties)) {
-        expand_properties properties_ptr = *reinterpret_cast<const expand_properties*>(Data);
+        expand_properties properties = *reinterpret_cast<const expand_properties*>(Data);
 
         // Make sure the output bit width is in the valid range of enum qpl_out_format
-        properties_ptr.output_bit_width = static_cast<qpl_out_format>(properties_ptr.output_bit_width % 4);
-        properties_ptr.input_bit_width  = properties_ptr.input_bit_width % 32;
+        properties.output_bit_width =
+                static_cast<qpl_out_format>(static_cast<uint8_t>(properties.output_bit_width) % 4);
+        properties.input_bit_width = properties.input_bit_width % 32;
 
         Data += sizeof(expand_properties);
         Size -= sizeof(expand_properties);
 
-        auto mask_byte_length = properties_ptr.mask_byte_length % (32 * 1024);
-        if (Size > mask_byte_length) {
+        auto mask_byte_length = properties.mask_byte_length % (32 * 1024);
+
+        const int64_t source_size   = static_cast<int64_t>(Size) - static_cast<int64_t>(mask_byte_length);
+        const bool    is_rle_parser = qpl_p_parquet_rle == parser;
+        const auto    source_ptr    = Data + mask_byte_length;
+        const bool    is_good_data  = validate_filtering_input(properties.input_bit_width, source_ptr, is_rle_parser,
+                                                               properties.output_bit_width, properties.number_of_elements,
+                                                               source_size, properties.destination_size);
+        if (is_good_data) {
             std::vector<uint8_t> mask(Data, Data + mask_byte_length);
 
             std::vector<uint8_t> source(Data + mask_byte_length, Data + Size);
-            properties_ptr.destination_size =
-                    std::min(static_cast<uint32_t>(mask_byte_length * 32), properties_ptr.destination_size);
-            std::vector<uint8_t> destination(properties_ptr.destination_size);
+            properties.destination_size =
+                    std::min(static_cast<uint32_t>(mask_byte_length * 32), properties.destination_size);
+            std::vector<uint8_t> destination(properties.destination_size);
 
             qpl_status status;
             uint32_t   job_size = 0;
@@ -72,10 +82,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, size_t Size) {
             job_ptr->next_out_ptr       = destination.data();
             job_ptr->available_out      = destination.size();
             job_ptr->op                 = qpl_op_expand;
-            job_ptr->num_input_elements = properties_ptr.number_of_elements;
-            job_ptr->src1_bit_width     = properties_ptr.input_bit_width;
-            job_ptr->src2_bit_width     = properties_ptr.input_bit_width_2;
-            job_ptr->out_bit_width      = properties_ptr.output_bit_width;
+            job_ptr->num_input_elements = properties.number_of_elements;
+            job_ptr->src1_bit_width     = properties.input_bit_width;
+            job_ptr->src2_bit_width     = properties.input_bit_width_2;
+            job_ptr->out_bit_width      = properties.output_bit_width;
             job_ptr->parser             = parser;
 
             status = qpl_execute_job(job_ptr);
