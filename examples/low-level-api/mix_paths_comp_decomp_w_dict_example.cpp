@@ -223,7 +223,11 @@ auto main(int argc, char** argv) -> int {
 
         // Compression and check if compression failed
         const auto comp_status = compression(execution_path, source, destination, dictionary_ptr);
-        if (comp_status != QPL_STS_OK) { return comp_status; }
+        if (comp_status == QPL_STS_NOT_SUPPORTED_MODE_ERR) {
+            return QPL_STS_OK;
+        } else if (comp_status != QPL_STS_OK) {
+            return comp_status;
+        }
 
         // Decompression with software_path and check if decompression failed
         const auto decomp_status = sw_decompression(destination, reference, dictionary_ptr);
