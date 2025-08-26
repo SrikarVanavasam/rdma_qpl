@@ -17,6 +17,7 @@
 #endif
 
 #include "qpl/c_api/defs.h"
+#include "qpl/c_api/project_version.h"
 
 #ifdef __cplusplus
 extern "C" {

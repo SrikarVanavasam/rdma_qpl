@@ -11,6 +11,8 @@
 
 #include "hw_dispatcher.hpp"
 
+#include "qpl/c_api/project_version.h"
+
 #if defined(__linux__)
 
 #endif

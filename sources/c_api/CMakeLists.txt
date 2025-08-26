@@ -26,6 +26,11 @@ file(GLOB QPL_C_API_SRC
 
 add_library(qpl_c_api OBJECT ${QPL_C_API_SRC})
 
+# Add CMake-generated header file `project_version.h` containing version information (like `QPL_VERSION` macro definition)
+set (qpl_versions_header "project_version.h")
+set (qpl_versions_header_path "${QPL_PROJECT_DIR}/include/qpl/c_api/${qpl_versions_header}")
+configure_file("${qpl_versions_header_path}.in" "${qpl_versions_header_path}" @ONLY)
+
 target_include_directories(qpl_c_api
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         PUBLIC $<BUILD_INTERFACE:${QPL_PROJECT_DIR}/include/> $<INSTALL_INTERFACE:include>
