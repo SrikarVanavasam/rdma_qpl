@@ -122,9 +122,14 @@ REF_INLINE qpl_status own_extract_le_be(qpl_job* const qpl_job_ptr) {
 
     // Extracted elements from source_ptr vector
     uint32_t* extracted_ptr = (uint32_t*)malloc((uint64_t)number_of_elements * sizeof(uint32_t));
+    if (extracted_ptr == NULL) { return QPL_STS_NO_MEM_ERR; }
 
     // Results of the operation
     uint32_t* results_ptr = (uint32_t*)malloc((uint64_t)number_of_elements * sizeof(uint32_t));
+    if (results_ptr == NULL) {
+        REF_FREE_PTR(extracted_ptr);
+        return QPL_STS_NO_MEM_ERR;
+    }
 
     // Convert source vector's elements to uint32_t format
     qpl_status status = ref_convert_to_32u_le_be(source_ptr, 0, source_bit_width, number_of_elements, extracted_ptr,
@@ -203,9 +208,14 @@ REF_INLINE qpl_status own_extract_prle(qpl_job* const qpl_job_ptr) {
 
     // Extracted elements from source_ptr vector
     uint32_t* extracted_ptr = (uint32_t*)malloc((uint64_t)number_of_elements * sizeof(uint32_t));
+    if (extracted_ptr == NULL) { return QPL_STS_NO_MEM_ERR; }
 
     // Results of the operation
     uint32_t* results_ptr = (uint32_t*)malloc((uint64_t)number_of_elements * sizeof(uint32_t));
+    if (results_ptr == NULL) {
+        REF_FREE_PTR(extracted_ptr);
+        return QPL_STS_NO_MEM_ERR;
+    }
 
     // Convert source vector's elements to uint32_t format
     status = ref_convert_to_32u_prle(source_ptr, source_end_ptr, extracted_ptr, &available_bytes);
