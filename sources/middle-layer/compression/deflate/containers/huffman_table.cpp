@@ -109,8 +109,8 @@ auto write_huffman_table_icf(BitBuf2* bit_buffer, huffman_table_icf& huffman_tab
     if (compression_mode != fixed_mode) {
         for (i = 0; i < QPLC_DEFLATE_LITERALS_COUNT; i++) {
             combined_table[i] = ll_codes[i].length;
-            compressed_len += ll_codes[i].length * ll_histogram[i];
-            fixed_compressed_len += fixed_ll_codes[i].length * ll_histogram[i];
+            compressed_len += ll_codes[i].length * static_cast<uint64_t>(ll_histogram[i]);
+            fixed_compressed_len += fixed_ll_codes[i].length * static_cast<uint64_t>(ll_histogram[i]);
         }
 
         for (; i < huffman_table.max_ll_code_index_ + 1; i++) {
@@ -131,7 +131,7 @@ auto write_huffman_table_icf(BitBuf2* bit_buffer, huffman_table_icf& huffman_tab
         huffman_table.max_ll_code_index_ = max_ll_code_index;
         huffman_table.max_d_code_index_  = max_d_code_index;
         for (i = 0; i <= end_of_block_code_index; i++) {
-            fixed_compressed_len += fixed_ll_codes[i].length * ll_histogram[i];
+            fixed_compressed_len += fixed_ll_codes[i].length * static_cast<uint64_t>(ll_histogram[i]);
         }
 
         for (; i < huffman_table.max_ll_code_index_ + 1; i++) {
@@ -161,7 +161,7 @@ auto write_huffman_table_icf(BitBuf2* bit_buffer, huffman_table_icf& huffman_tab
                       huffman_table.max_ll_code_index_ - end_of_block_code_index, huffman_table.max_d_code_index_,
                       end_of_block);
 
-        compressed_len += 8 * buffer_used(bit_buffer) + bit_buffer->m_bit_count;
+        compressed_len += 8ULL * buffer_used(bit_buffer) + bit_buffer->m_bit_count;
     } else {
         /* Substitute in fixed block since it creates smaller block or fixed mode enabled */
         auto* fixed_hufftables_ptr = reinterpret_cast<uint8_t*>(&fixed_hufftables);
