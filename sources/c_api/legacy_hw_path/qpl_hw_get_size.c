@@ -12,7 +12,7 @@
 #include "hardware_state.h"
 #include "own_defs.h"
 
-QPL_FUN(uint32_t, hw_get_job_size, ()) {
+QPL_FUN(uint32_t, hw_get_job_size, (void)) {
     uint32_t size = 0U;
 
     size = QPL_ALIGNED_SIZE(sizeof(qpl_hw_state), QPL_DEFAULT_ALIGNMENT);

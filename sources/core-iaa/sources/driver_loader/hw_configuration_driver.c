@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: MIT
  ******************************************************************************/
 
-#if defined(__linux__) && defined(DYNAMIC_LOADING_LIBACCEL_CONFIG)
-
 #include "hw_configuration_driver.h"
 
 #include <dlfcn.h>
@@ -180,7 +178,14 @@ bool own_load_configuration_functions(void* driver_instance_ptr) {
     DIAG("loading functions table:\n");
     while (functions_table[i].function_name) {
         DIAG("    loading %s\n", functions_table[i].function_name);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
         functions_table[i].function = (library_function)dlsym(driver_instance_ptr, functions_table[i].function_name);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
         char* err_message = dlerror();
 
@@ -228,4 +233,3 @@ hw_accelerator_status own_load_accelerator_configuration_driver(void** driver_in
 
     return HW_ACCELERATOR_STATUS_OK;
 }
-#endif //if defined( __linux__ ) && defined ( DYNAMIC_LOADING_LIBACCEL_CONFIG )

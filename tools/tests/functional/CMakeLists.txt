@@ -21,7 +21,7 @@ add_executable(tests main.cpp
                $<TARGET_OBJECTS:negative_tests>
                $<TARGET_OBJECTS:unit_tests>)
 
-set_target_properties(tests PROPERTIES CXX_STANDARD 17)
+qpl_set_common_target_settings(tests)
 
 get_property(LIB_DEPS GLOBAL PROPERTY QPL_LIB_DEPS)
 
@@ -34,8 +34,6 @@ target_link_libraries(tests
         "$<$<PLATFORM_ID:Linux>:stdc++fs>"
         "$<$<AND:$<PLATFORM_ID:Linux>,$<STREQUAL:${DYNAMIC_LOADING_LIBACCEL_CONFIG},ON>>:${CMAKE_DL_LIBS}>"
         "$<$<AND:$<PLATFORM_ID:Linux>,$<STREQUAL:${DYNAMIC_LOADING_LIBACCEL_CONFIG},OFF>>:accel-config>")
-
-set_target_properties(tests PROPERTIES CXX_STANDARD 17)
 
 target_compile_definitions(tests
         PRIVATE $<TARGET_PROPERTY:tests_common,COMPILE_DEFINITIONS>)

@@ -108,6 +108,11 @@ typedef struct {
     uint32_t drop_initial_decompress_out_bytes; /**< Number bytes that should be dropped before Filtering start */
 } hw_iaa_aecs_filter;
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+
 /**
  * @brief Describes @ref hw_iaa_aecs_decompress structure.
  * Contains Decompress part of AECS data, with unions for using either Format-1 or Format-2.
@@ -163,6 +168,10 @@ typedef struct {
     uint8_t  history_buffer[4096];                 /**< History Buffer Data */
     uint32_t reserved9[6];                         /**< Reserved bytes, Padding */
 } hw_iaa_aecs_decompress;
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 /**
  * @brief Describes an AECS state shared with Decompress and Filter operations. Decompress and Filter operations

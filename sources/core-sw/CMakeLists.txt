@@ -45,8 +45,6 @@ foreach(PLATFORM_ID IN LISTS PLATFORMS_LIST)
                                 PRIVATE $<TARGET_PROPERTY:isal,INTERFACE_INCLUDE_DIRECTORIES>)
 
      set_target_properties(qplcore_${PLATFORM_ID} PROPERTIES
-                           $<$<C_COMPILER_ID:MSVC>:C_STANDARD 18>
-                           $<$<C_COMPILER_ID:GNU,Clang>:C_STANDARD 17>
                            C_VISIBILITY_PRESET hidden)
 
      if (WIN32)
@@ -116,7 +114,6 @@ foreach(PLATFORM_ID IN LISTS PLATFORMS_LIST)
 endforeach()
 
 set_target_properties(qplcore_sw_dispatcher PROPERTIES
-                      CXX_STANDARD 17
                       C_VISIBILITY_PRESET hidden
                       CXX_VISIBILITY_PRESET hidden)
 

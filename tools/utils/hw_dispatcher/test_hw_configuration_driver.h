@@ -22,7 +22,7 @@ extern "C" {
 /**
  * @brief Type of function that should be loaded from accelerator configuration driver
  */
-typedef void* qpl_test_library_function;
+typedef void (*qpl_test_library_function)(void);
 
 /**
  * @brief Structure that maps function implementation to its name

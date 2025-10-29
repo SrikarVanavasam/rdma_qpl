@@ -49,7 +49,6 @@ foreach(source_file ${cpp_files})
         target_link_libraries(${example_name} PRIVATE accel-config)
         target_compile_definitions(${example_name} PRIVATE "QPL_EXAMPLES_USE_LIBACCEL_CONFIG")
     endif()
-    set_target_properties(${example_name} PROPERTIES CXX_STANDARD 17)
 
     if(WIN32)
         target_compile_options(${example_name} PRIVATE "$<$<CONFIG:Release>:-O2>")

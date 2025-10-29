@@ -21,14 +21,12 @@ add_library(tool_generator OBJECT
         ${QPL_GEN_C_SRC}
         ${QPL_GEN_ASM_SRC})
 
+qpl_set_common_target_settings(tool_generator C 99)
+
 target_include_directories(tool_generator
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deflate_generator/include>
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/configurators>)
-
-set_target_properties(tool_generator PROPERTIES
-        CXX_STANDARD 17
-        C_STANDARD 99)
 
 target_compile_options(tool_generator PRIVATE
         "$<$<CONFIG:Debug>:>"

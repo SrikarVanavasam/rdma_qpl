@@ -19,7 +19,7 @@ void qpl_flatten_ll(uint32_t* ll_hist);
 
 #ifdef QPL_LIB
 #ifdef __cplusplus
-}; // extern "C"
+} // extern "C"
 #endif
 #endif
 

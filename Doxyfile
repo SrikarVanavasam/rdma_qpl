@@ -2150,14 +2150,14 @@ INCLUDE_FILE_PATTERNS  =
 # recursively expanded use the := operator instead of the = operator.
 # This tag requires that the tag ENABLE_PREPROCESSING is set to YES.
 
-PREDEFINED             = "QPL_API(type,name,arg)=type name arg;" \
+PREDEFINED             = "QPL_API(type,name,arg)=type name arg" \
                          "OWN_FUN(type,name,arg)=type name arg" \
                          "QPL_FUN(type,name,arg)=type name arg" \
                          "HW_PATH_GENERAL_API(type,name,arg)=type hw_##name arg" \
                          "HW_PATH_IAA_API(type,name,arg)=type hw_iaa_##name arg" \
                          "HW_PATH_IAA_AECS_API(type,name,arg)=type hw_iaa_aecs_##name arg" \
                          "HW_PATH_BYTE_PACKED_STRUCTURE_BEGIN=typedef struct" \
-                         "OWN_QPLC_API(type,name,arg)=type name arg;" \
+                         "OWN_QPLC_API(type,name,arg)=type name arg" \
                          "OWN_QPLC_FUN(type,name,arg)=type name arg" \
                          "QPL_DEPRECATED(msg)=" \
                          "QPL_PROCESSING_ERROR_BASE=0U" \

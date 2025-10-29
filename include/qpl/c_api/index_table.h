@@ -65,7 +65,7 @@ typedef struct {
  *     - @ref QPL_STS_NULL_PTR_ERR.
  */
 QPL_API(qpl_status, qpl_get_index_table_size,
-        (uint32_t mini_block_count, uint32_t mini_blocks_per_block, size_t* size_ptr))
+        (uint32_t mini_block_count, uint32_t mini_blocks_per_block, size_t* size_ptr));
 
 /**
  * @brief Sets source pointer to required position for further mini-block decompression
@@ -83,7 +83,7 @@ QPL_API(qpl_status, qpl_get_index_table_size,
  */
 QPL_API(qpl_status, qpl_set_mini_block_location,
         (uint32_t start_bit, uint32_t last_bit, uint8_t** source_pptr, uint32_t* first_bit_offset_ptr,
-         uint32_t* last_bit_offset_ptr, uint32_t* compressed_size_ptr))
+         uint32_t* last_bit_offset_ptr, uint32_t* compressed_size_ptr));
 
 /**
  * @brief Sets appropriate deflate block index
@@ -97,7 +97,7 @@ QPL_API(qpl_status, qpl_set_mini_block_location,
  *     - @ref QPL_STS_NULL_PTR_ERR.
  */
 QPL_API(qpl_status, qpl_find_header_block_index,
-        (qpl_index_table * table_ptr, uint32_t mini_block_number, uint32_t* block_index_ptr))
+        (qpl_index_table * table_ptr, uint32_t mini_block_number, uint32_t* block_index_ptr));
 
 /**
  * @brief Sets appropriate mini-block index
@@ -111,7 +111,7 @@ QPL_API(qpl_status, qpl_find_header_block_index,
  *     - @ref QPL_STS_NULL_PTR_ERR.
  */
 QPL_API(qpl_status, qpl_find_mini_block_index,
-        (qpl_index_table * table_ptr, uint32_t mini_block_number, uint32_t* block_index_ptr))
+        (qpl_index_table * table_ptr, uint32_t mini_block_number, uint32_t* block_index_ptr));
 
 /** @} */
 

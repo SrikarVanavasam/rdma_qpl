@@ -104,6 +104,6 @@ auto deflate_state_builder<execution_path_t::software>::dictionary(qpl_dictionar
     stream_.dictionary_support_                       = dictionary_support_t::enabled;
 
     return *reinterpret_cast<common_type*>(this);
-};
+}
 
 } // namespace qpl::ml::compression

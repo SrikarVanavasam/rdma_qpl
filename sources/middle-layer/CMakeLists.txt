@@ -61,7 +61,6 @@ target_compile_definitions(middle_layer_lib
         PUBLIC $<$<BOOL:${DYNAMIC_LOADING_LIBACCEL_CONFIG}>:DYNAMIC_LOADING_LIBACCEL_CONFIG>)
 
 set_target_properties(middle_layer_lib PROPERTIES
-                      CXX_STANDARD 17
                       CXX_VISIBILITY_PRESET hidden)
 
 target_include_directories(middle_layer_lib

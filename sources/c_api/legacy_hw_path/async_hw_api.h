@@ -18,7 +18,7 @@ QPL_API(qpl_status, hw_submit_job, (qpl_job * qpl_job_ptr));
 
 QPL_API(qpl_status, hw_check_job, (qpl_job * qpl_job_ptr));
 
-QPL_API(uint32_t, hw_get_job_size, ());
+QPL_API(uint32_t, hw_get_job_size, (void));
 
 #ifdef __cplusplus
 }

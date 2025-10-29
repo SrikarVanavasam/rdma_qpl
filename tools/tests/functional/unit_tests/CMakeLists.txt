@@ -11,10 +11,11 @@ enable_language(CXX)
 
 file(GLOB SOURCES algorithmic/*.cpp)
 
-add_library(unit_tests OBJECT ${SOURCES} )
+add_library(unit_tests OBJECT ${SOURCES})
+
+qpl_set_common_target_settings(unit_tests)
 
 get_target_property(QPL_SOURCE_DIR qpl SOURCE_DIR)
-set_target_properties(unit_tests PROPERTIES CXX_STANDARD 17)
 
 target_include_directories(unit_tests
         PRIVATE $<TARGET_PROPERTY:tests_common,INTERFACE_INCLUDE_DIRECTORIES>

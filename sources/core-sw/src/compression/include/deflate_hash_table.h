@@ -45,7 +45,7 @@ typedef void (*qplc_deflate_hash_table_reset_ptr)(deflate_hash_table_t* const hi
  *
  * @param[in,out]  hash_table_ptr  pointer to @link own_deflate_hash_table @endlink that should be reset
  */
-OWN_QPLC_API(void, deflate_hash_table_reset, (deflate_hash_table_t* const hash_table_ptr))
+OWN_QPLC_API(void, deflate_hash_table_reset, (deflate_hash_table_t* const hash_table_ptr));
 
 /**
  * @brief Updates hash-table with using given index and hash value

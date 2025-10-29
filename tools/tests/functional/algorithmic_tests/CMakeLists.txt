@@ -13,8 +13,9 @@ file(GLOB SOURCES low_level_api/*.cpp)
 
 add_library(algorithmic_tests OBJECT ${SOURCES})
 
+qpl_set_common_target_settings(algorithmic_tests)
+
 get_target_property(QPL_SOURCE_DIR qpl SOURCE_DIR)
-set_target_properties(algorithmic_tests PROPERTIES CXX_STANDARD 17)
 
 target_include_directories(algorithmic_tests
         PRIVATE ${QPL_SOURCE_DIR}/sources/include

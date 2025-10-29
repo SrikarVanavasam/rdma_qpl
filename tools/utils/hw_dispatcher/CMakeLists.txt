@@ -15,14 +15,12 @@ file(GLOB TOOLS_HW_DISPATCH_SRC *.c *.cpp)
 
 add_library(tool_hw_dispatcher OBJECT ${TOOLS_HW_DISPATCH_SRC})
 
+qpl_set_common_target_settings(tool_hw_dispatcher C 99)
+
 target_include_directories(tool_hw_dispatcher
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         PRIVATE $<TARGET_PROPERTY:tool_common,INTERFACE_INCLUDE_DIRECTORIES>
         PRIVATE $<TARGET_PROPERTY:qpl,INTERFACE_INCLUDE_DIRECTORIES>)
-
-set_target_properties(tool_hw_dispatcher PROPERTIES
-        CXX_STANDARD 17
-        C_STANDARD 99)
 
 target_compile_definitions(tool_hw_dispatcher
         PUBLIC $<$<BOOL:${DYNAMIC_LOADING_LIBACCEL_CONFIG}>:DYNAMIC_LOADING_LIBACCEL_CONFIG>)

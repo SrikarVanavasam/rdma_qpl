@@ -40,6 +40,12 @@ struct level_buf {
     struct deflate_icf*   icf_buf_next;
     uint64_t              icf_buf_avail_out;
     struct deflate_icf*   icf_buf_start;
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+
     union {
         struct hash8k_buf    hash8k;
         struct hash_hist_buf hash_hist;
@@ -49,6 +55,10 @@ struct level_buf {
         struct hash_hist_buf lvl2;
         struct hash_map_buf  lvl3;
     };
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 };
 
 #endif //QPL_SOURCES_ISAL_IGZIP_IGZIP_LEVEL_BUF_STRUCTS_H

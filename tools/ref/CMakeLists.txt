@@ -18,15 +18,12 @@ file(GLOB QPL_C_SRC *.c)
 # Adding library target
 add_library(qplref STATIC ${QPL_C_SRC})
 
-qpl_set_common_target_settings(qplref)
+qpl_set_common_target_settings(qplref C 99)
 
 # Setting external and internal interfaces for reference library
 target_include_directories(qplref
                            PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                            PRIVATE $<TARGET_PROPERTY:qpl,INTERFACE_INCLUDE_DIRECTORIES>)
-
-set_target_properties(qplref PROPERTIES
-                      C_STANDARD 99)
 
 target_compile_options(qplref PUBLIC
                        "$<$<CONFIG:Debug>:>"

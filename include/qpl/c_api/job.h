@@ -158,7 +158,7 @@ typedef struct {
  *     - @ref QPL_STS_OK;
  *     - @ref QPL_STS_PATH_ERR.
  */
-QPL_API(qpl_status, qpl_get_job_size, (qpl_path_t qpl_path, uint32_t* job_size_ptr))
+QPL_API(qpl_status, qpl_get_job_size, (qpl_path_t qpl_path, uint32_t* job_size_ptr));
 
 /**
  * @brief Initializes the qpl_job structure and ensures proper alignment of internal structures.
@@ -179,7 +179,7 @@ QPL_API(qpl_status, qpl_get_job_size, (qpl_path_t qpl_path, uint32_t* job_size_p
  *     - @ref QPL_STS_PATH_ERR;
  *     - @ref QPL_STS_NULL_PTR_ERR.
  */
-QPL_API(qpl_status, qpl_init_job, (qpl_path_t qpl_path, qpl_job* qpl_job_ptr))
+QPL_API(qpl_status, qpl_init_job, (qpl_path_t qpl_path, qpl_job* qpl_job_ptr));
 
 /**
  * @brief Parses the qpl_job structure and forms the corresponding processing functions pipeline.
@@ -188,7 +188,7 @@ QPL_API(qpl_status, qpl_init_job, (qpl_path_t qpl_path, qpl_job* qpl_job_ptr))
  *
  * @return One of statuses presented in the @ref qpl_status
  */
-QPL_API(qpl_status, qpl_execute_job, (qpl_job * qpl_job_ptr))
+QPL_API(qpl_status, qpl_execute_job, (qpl_job * qpl_job_ptr));
 
 /**
  * @brief Parses the qpl_job structure and forms the corresponding processing functions pipeline.
@@ -199,7 +199,7 @@ QPL_API(qpl_status, qpl_execute_job, (qpl_job * qpl_job_ptr))
  * @return One of statuses presented in the @ref qpl_status
  *
  */
-QPL_API(qpl_status, qpl_submit_job, (qpl_job * qpl_job_ptr))
+QPL_API(qpl_status, qpl_submit_job, (qpl_job * qpl_job_ptr));
 
 /**
  * @brief Waits for the end of @ref qpl_job processing. (waits until the job is completed)
@@ -209,7 +209,7 @@ QPL_API(qpl_status, qpl_submit_job, (qpl_job * qpl_job_ptr))
  * @return One of statuses presented in the @ref qpl_status
  *
  */
-QPL_API(qpl_status, qpl_wait_job, (qpl_job * qpl_job_ptr))
+QPL_API(qpl_status, qpl_wait_job, (qpl_job * qpl_job_ptr));
 
 /**
  * @brief Checks the status of @ref qpl_job processing. (can be queried periodically to check the status
@@ -219,7 +219,7 @@ QPL_API(qpl_status, qpl_wait_job, (qpl_job * qpl_job_ptr))
  *
  * @return One of statuses presented in the @ref qpl_status
  */
-QPL_API(qpl_status, qpl_check_job, (qpl_job * qpl_job_ptr))
+QPL_API(qpl_status, qpl_check_job, (qpl_job * qpl_job_ptr));
 
 /**
  * @brief Completes @ref qpl_job lifecycle: disconnects from the internal library context, frees internal resources.
@@ -228,7 +228,7 @@ QPL_API(qpl_status, qpl_check_job, (qpl_job * qpl_job_ptr))
  *
  * @return ne of statuses presented in the @ref qpl_status
  */
-QPL_API(qpl_status, qpl_fini_job, (qpl_job * qpl_job_ptr))
+QPL_API(qpl_status, qpl_fini_job, (qpl_job * qpl_job_ptr));
 
 /** @} */
 

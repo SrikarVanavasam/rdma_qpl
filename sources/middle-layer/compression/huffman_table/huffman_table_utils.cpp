@@ -1204,4 +1204,4 @@ bool is_equal(qpl_decompression_huffman_table& table, qpl_decompression_huffman_
     return (sw_table_diff == 0) && (hw_table_diff == 0) && (deflate_buf_diff == 0) && (lookup_buf_diff == 0);
 }
 
-}; // namespace qpl::ml::compression
+} // namespace qpl::ml::compression

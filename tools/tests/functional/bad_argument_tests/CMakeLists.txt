@@ -13,7 +13,7 @@ file(GLOB SOURCES low_level_api/*.cpp)
 
 add_library(bad_argument_tests OBJECT ${SOURCES})
 
-set_target_properties(bad_argument_tests PROPERTIES CXX_STANDARD 17)
+qpl_set_common_target_settings(bad_argument_tests)
 
 target_include_directories(bad_argument_tests
         PRIVATE $<TARGET_PROPERTY:tests_common,INTERFACE_INCLUDE_DIRECTORIES>

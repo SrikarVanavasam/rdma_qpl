@@ -83,6 +83,11 @@ extern "C" {
 #define HEAP_TREE_NODE_START (HEAP_TREE_SIZE - 1)
 #define MAX_BL_CODE_LEN      7
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+
 /**
  * @brief Structure used to store huffman codes
  */
@@ -104,10 +109,19 @@ struct huff_code {
     };
 };
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
 struct tree_node {
     uint32_t child;
     uint32_t depth;
 };
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 
 struct heap_tree {
     union {
@@ -117,10 +131,19 @@ struct heap_tree {
     };
 };
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
 struct rl_code {
     uint8_t code;
     uint8_t extra_bits;
 };
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 
 struct hufftables_icf {
     union {
@@ -135,6 +158,10 @@ struct hufftables_icf {
         };
     };
 };
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 /**
  * @brief Creates a representation of the huffman code from a histogram used to

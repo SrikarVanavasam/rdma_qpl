@@ -184,8 +184,15 @@ bool qpl_test_own_load_configuration_functions(void* driver_instance_ptr) {
     uint32_t i = 0U;
 
     while (qpl_test_functions_table[i].function_name) {
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
         qpl_test_functions_table[i].function =
                 (qpl_test_library_function)dlsym(driver_instance_ptr, qpl_test_functions_table[i].function_name);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
         char* err_message = dlerror();
 

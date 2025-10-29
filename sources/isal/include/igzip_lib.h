@@ -551,11 +551,22 @@ struct inflate_state {
     uint32_t                       crc_flag;       //!< Flag identifying whether to track of crc
     uint32_t                       crc;            //!< Contains crc or adler32 of output if crc_flag is set
     uint32_t                       hist_bits;      //!< Log base 2 of maximum lookback distance
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+
     union {
         int32_t  type0_block_len; //!< Length left to read of type 0 block when outbuffer overflow occurred
         int32_t  count;           //!< Count of bytes remaining to be parsed
         uint32_t dict_id;
     };
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
     int32_t write_overflow_lits;
     int32_t write_overflow_len;
     int32_t copy_overflow_length;   //!< Length left to copy when outbuffer overflow occurred

@@ -32,7 +32,7 @@ extern "C" {
  * @brief Macro to manipulate public API prototypes
  */
 #if !defined(QPL_API)
-#define QPL_API(type, name, arg) type name arg;
+#define QPL_API(type, name, arg) type name arg
 #endif
 
 #if !defined(UNREFERENCED_PARAMETER)

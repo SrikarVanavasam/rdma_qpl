@@ -51,7 +51,7 @@ typedef void (*qplc_aggregates_t_ptr)(const uint8_t* src_ptr, uint32_t length, u
  */
 OWN_QPLC_API(void, qplc_bit_aggregates_8u,
              (const uint8_t* src_ptr, uint32_t length, uint32_t* min_value_ptr, uint32_t* max_value_ptr,
-              uint32_t* sum_ptr, uint32_t* index_ptr))
+              uint32_t* sum_ptr, uint32_t* index_ptr));
 /** @} */
 
 /**
@@ -72,15 +72,15 @@ OWN_QPLC_API(void, qplc_bit_aggregates_8u,
  */
 OWN_QPLC_API(void, qplc_aggregates_8u,
              (const uint8_t* src_ptr, uint32_t length, uint32_t* min_value_ptr, uint32_t* max_value_ptr,
-              uint32_t* sum_ptr, uint32_t* index_ptr))
+              uint32_t* sum_ptr, uint32_t* index_ptr));
 
 OWN_QPLC_API(void, qplc_aggregates_16u,
              (const uint8_t* src_ptr, uint32_t length, uint32_t* min_value_ptr, uint32_t* max_value_ptr,
-              uint32_t* sum_ptr, uint32_t* index_ptr))
+              uint32_t* sum_ptr, uint32_t* index_ptr));
 
 OWN_QPLC_API(void, qplc_aggregates_32u,
              (const uint8_t* src_ptr, uint32_t length, uint32_t* min_value_ptr, uint32_t* max_value_ptr,
-              uint32_t* sum_ptr, uint32_t* index_ptr))
+              uint32_t* sum_ptr, uint32_t* index_ptr));
 /** @} */
 
 #ifdef __cplusplus

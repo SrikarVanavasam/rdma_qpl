@@ -20,9 +20,6 @@
 #include "deflate_histogram.h"
 #include "qplc_compression_consts.h"
 
-#define OWN_CRC32(buf, len, init_crc, ...) \
-    ((0, ##__VA_ARGS__) ? qpl_crc32_iscsi(buf, len, init_crc) : qpl_crc32_gzip_refl(init_crc, buf, len))
-
 /* ------ Own functions implementation ------ */
 
 void own_deflate_job_switch_to_next(own_deflate_job* const job_ptr, const uint32_t range) {
@@ -34,8 +31,9 @@ static inline void own_deflate_job_update_missed_literals(own_deflate_job* const
                                                           const uint8_t*         upper_bound_ptr) {
     while (job_ptr->current_ptr < upper_bound_ptr) {
         // Variables
-        const uint32_t hash_value = OWN_CRC32(job_ptr->current_ptr, QPLC_DEFLATE_BYTES_FOR_HASH_CALCULATION, 0U) &
-                                    job_ptr->histogram_ptr->table.hash_mask;
+        const uint32_t hash_value =
+                OWN_CRC32(job_ptr->current_ptr, QPLC_DEFLATE_BYTES_FOR_HASH_CALCULATION, 0U, GZIP_REFL) &
+                job_ptr->histogram_ptr->table.hash_mask;
 
         // Updating hash table
         own_deflate_hash_table_update(&job_ptr->histogram_ptr->table,
@@ -95,8 +93,8 @@ void own_deflate_job_process_literals_no_instructions(own_deflate_job* const job
             const uint32_t bytes_for_hash = QPL_MIN(QPLC_DEFLATE_BYTES_FOR_HASH_CALCULATION,
                                                     (uint32_t)(upper_bound_ptr - job_ptr->current_ptr));
 
-            const uint32_t hash_value =
-                    OWN_CRC32(job_ptr->current_ptr, bytes_for_hash, 0U) & job_ptr->histogram_ptr->table.hash_mask;
+            const uint32_t hash_value = OWN_CRC32(job_ptr->current_ptr, bytes_for_hash, 0U, GZIP_REFL) &
+                                        job_ptr->histogram_ptr->table.hash_mask;
 
             // Updating histogram
             job_ptr->histogram_ptr->literals_matches[*job_ptr->current_ptr]++;
@@ -111,8 +109,9 @@ void own_deflate_job_process_literals_no_instructions(own_deflate_job* const job
     } else {
         while (job_ptr->current_ptr < upper_bound_ptr) {
             // Variables
-            const uint32_t hash_value = OWN_CRC32(job_ptr->current_ptr, QPLC_DEFLATE_BYTES_FOR_HASH_CALCULATION, 0U) &
-                                        job_ptr->histogram_ptr->table.hash_mask;
+            const uint32_t hash_value =
+                    OWN_CRC32(job_ptr->current_ptr, QPLC_DEFLATE_BYTES_FOR_HASH_CALCULATION, 0U, GZIP_REFL) &
+                    job_ptr->histogram_ptr->table.hash_mask;
 
             // Updating histogram
             job_ptr->histogram_ptr->literals_matches[*job_ptr->current_ptr]++;

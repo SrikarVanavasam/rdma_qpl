@@ -40,7 +40,7 @@ extern "C" {
  *
  * @return uint32_t
  */
-QPL_API(uint32_t, qpl_get_safe_deflate_compression_buffer_size, (uint32_t source_size))
+QPL_API(uint32_t, qpl_get_safe_deflate_compression_buffer_size, (uint32_t source_size));
 
 /** @} */
 

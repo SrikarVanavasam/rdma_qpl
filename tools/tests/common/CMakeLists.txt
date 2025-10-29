@@ -12,7 +12,8 @@ enable_language(CXX)
 file(GLOB SOURCES *.cpp)
 
 add_library(tests_common STATIC ${SOURCES})
-set_target_properties(tests_common PROPERTIES CXX_STANDARD 17)
+
+qpl_set_common_target_settings(tests_common)
 
 target_include_directories(tests_common
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>

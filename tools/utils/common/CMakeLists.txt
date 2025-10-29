@@ -22,8 +22,6 @@ target_include_directories(tool_common
         PRIVATE $<TARGET_PROPERTY:qpl_c_api,INTERFACE_INCLUDE_DIRECTORIES>
         PRIVATE $<TARGET_PROPERTY:middle_layer_lib,INTERFACE_INCLUDE_DIRECTORIES>)   #todo remove dependency
 
-set_target_properties(tool_common PROPERTIES CXX_STANDARD 17)
-
 target_link_libraries(tool_common
         PRIVATE "$<$<PLATFORM_ID:Linux>:stdc++fs>"
         PUBLIC tool_hw_dispatcher) # iaa_features_checks.hpp depends on implementations from tool_hw_dispatcher

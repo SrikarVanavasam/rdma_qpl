@@ -18,6 +18,12 @@
 #include "deflate_histogram.h"
 #include "stdbool.h"
 
+#define OWN_CRC32_ISCSI(buf, len, init_crc) qpl_crc32_iscsi(buf, len, init_crc)
+
+#define OWN_CRC32_GZIP_REFL(buf, len, init_crc) qpl_crc32_gzip_refl(init_crc, buf, len)
+
+#define OWN_CRC32(buf, len, init_crc, function_impl) OWN_CRC32_##function_impl(buf, len, init_crc)
+
 #ifdef __cplusplus
 extern "C" {
 #endif

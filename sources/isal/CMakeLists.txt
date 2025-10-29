@@ -64,7 +64,7 @@ set(FEATURE_FLAGS -DHAVE_AS_KNOWS_AVX512 -DAS_FEATURE_LEVEL=10)
 add_library(isal OBJECT ${ISAL_C_SRC})
 add_library(isal_asm OBJECT ${ISAL_ASM_SRC})
 
-qpl_set_common_target_settings(isal)
+qpl_set_common_target_settings(isal C 99 CXX 11)
 
 set_property(GLOBAL APPEND PROPERTY QPL_LIB_DEPS
              $<TARGET_OBJECTS:isal>)
@@ -78,8 +78,6 @@ target_include_directories(isal
                            PUBLIC igzip)
 
 set_target_properties(isal PROPERTIES
-                      CXX_STANDARD 11
-                      C_STANDARD 99
                       CXX_VISIBILITY_PRESET hidden
                       C_VISIBILITY_PRESET hidden)
 
@@ -100,3 +98,8 @@ target_compile_options(isal_asm PUBLIC "-I${CMAKE_CURRENT_SOURCE_DIR}/include/"
 target_compile_definitions(isal PUBLIC
                            QPL_LIB
                            NDEBUG)
+
+if (NOT MSVC)
+    # Setting POSIX compliance level for Linux builds (to use strnlen() function on Linux)
+    target_compile_definitions(isal PRIVATE _POSIX_C_SOURCE=200809L)
+endif()

@@ -14,9 +14,15 @@ project(core_iaa C)
 
 # Find Kernels Sources
 file(GLOB HW_PATH_SRC sources/aecs/*.c
-                      sources/driver_loader/*.c
                       sources/descriptors/*.c
                       sources/*.c)
+
+if (UNIX)
+    if (DYNAMIC_LOADING_LIBACCEL_CONFIG)
+        file(GLOB driver_loader_sources sources/driver_loader/*.c)
+        list(APPEND HW_PATH_SRC ${driver_loader_sources})
+    endif()
+endif()
 
 # Create library
 add_library(core_iaa OBJECT ${HW_PATH_SRC})
@@ -33,8 +39,6 @@ target_include_directories(core_iaa
         PRIVATE $<TARGET_PROPERTY:qplcore_sw_dispatcher,INTERFACE_INCLUDE_DIRECTORIES>)
 
 set_target_properties(core_iaa PROPERTIES
-        $<$<C_COMPILER_ID:MSVC>:C_STANDARD 18>
-        $<$<C_COMPILER_ID:GNU,Clang>:C_STANDARD 17>
         C_VISIBILITY_PRESET hidden)
 
 target_compile_options(core_iaa
@@ -42,8 +46,6 @@ target_compile_options(core_iaa
                                        $<$<CONFIG:Release>:-O3;-U_FORTIFY_SOURCE;-D_FORTIFY_SOURCE=2>>
         PRIVATE $<$<C_COMPILER_ID:MSVC>:${QPL_WINDOWS_TOOLCHAIN_REQUIRED_FLAGS};
                                         $<$<CONFIG:Release>:-O2>>)
-
-target_compile_features(core_iaa PRIVATE c_std_11)
 
 target_compile_definitions(core_iaa PRIVATE QPL_BADARG_CHECK
         PRIVATE $<$<BOOL:${LOG_HW_INIT}>:LOG_HW_INIT>

@@ -13,11 +13,11 @@ file(GLOB SOURCES *.cpp)
 
 add_library(thread_tests OBJECT ${SOURCES})
 
+qpl_set_common_target_settings(thread_tests)
+
 target_link_libraries(thread_tests
         PRIVATE tests_common
         PRIVATE qpl)
-
-set_target_properties(thread_tests PROPERTIES CXX_STANDARD 17)
 
 target_compile_definitions(thread_tests
         PRIVATE $<TARGET_PROPERTY:tests_common,COMPILE_DEFINITIONS>)
