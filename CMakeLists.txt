@@ -129,6 +129,7 @@ if (QPL_USE_CLANG_TIDY)
 endif ()
 
 include(cmake/CompileOptions.cmake)
+include(cmake/target_settings.cmake)
 include(GenerateExportHeader)
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)

@@ -21,6 +21,8 @@ file(GLOB HW_PATH_SRC sources/aecs/*.c
 # Create library
 add_library(core_iaa OBJECT ${HW_PATH_SRC})
 
+qpl_set_common_target_settings(core_iaa)
+
 set_property(GLOBAL APPEND PROPERTY QPL_LIB_DEPS
              $<TARGET_OBJECTS:core_iaa>)
 

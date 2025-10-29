@@ -39,6 +39,7 @@ foreach(source_file ${cpp_files})
 
     # create executable
     add_executable(${example_name} ${source_file})
+    qpl_set_common_target_settings(${example_name})
     if (NOT ${source_file} MATCHES "with_data")
         target_link_libraries(${example_name} PRIVATE qpl)
     else()
@@ -51,9 +52,9 @@ foreach(source_file ${cpp_files})
     set_target_properties(${example_name} PROPERTIES CXX_STANDARD 17)
 
     if(WIN32)
-        target_compile_options(${example_name} PRIVATE "$<$<CONFIG:Release>:-O2>" /WX)
+        target_compile_options(${example_name} PRIVATE "$<$<CONFIG:Release>:-O2>")
     else()
-        target_compile_options(${example_name} PRIVATE "$<$<CONFIG:Release>:-O3>" -Werror)
+        target_compile_options(${example_name} PRIVATE "$<$<CONFIG:Release>:-O3>")
     endif()
 endforeach()
 
@@ -65,6 +66,7 @@ foreach(c_source_file ${c_files})
 
     # create executable
     add_executable(${example_name} ${c_source_file})
+    qpl_set_common_target_settings(${example_name})
     target_link_libraries(${example_name} PRIVATE qpl)
     if(NOT WIN32)
         # Using from C applications require C++ runtime library installed on the system, and adding -lstdc++
@@ -76,7 +78,7 @@ foreach(c_source_file ${c_files})
     set_target_properties(${example_name} PROPERTIES LINKER_LANGUAGE C)
 
     if(WIN32)
-        target_compile_options(${example_name} PRIVATE "$<$<CONFIG:Release>:-O2>" /WX)
+        target_compile_options(${example_name} PRIVATE "$<$<CONFIG:Release>:-O2>")
     else()
         target_compile_options(${example_name} PRIVATE "$<$<CONFIG:Release>:-O3>")
     endif()

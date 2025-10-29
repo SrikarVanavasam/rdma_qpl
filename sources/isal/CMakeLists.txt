@@ -64,6 +64,8 @@ set(FEATURE_FLAGS -DHAVE_AS_KNOWS_AVX512 -DAS_FEATURE_LEVEL=10)
 add_library(isal OBJECT ${ISAL_C_SRC})
 add_library(isal_asm OBJECT ${ISAL_ASM_SRC})
 
+qpl_set_common_target_settings(isal)
+
 set_property(GLOBAL APPEND PROPERTY QPL_LIB_DEPS
              $<TARGET_OBJECTS:isal>)
 
@@ -83,7 +85,7 @@ set_target_properties(isal PROPERTIES
 
 target_compile_options(isal PRIVATE
                        "$<$<C_COMPILER_ID:GNU,Clang>:${QPL_LINUX_TOOLCHAIN_REQUIRED_FLAGS}>"
-                       "$<$<C_COMPILER_ID:MSVC>:/WX;${DISABLED_WARNINGS_FLAGS};${QPL_WINDOWS_TOOLCHAIN_REQUIRED_FLAGS}>"
+                       "$<$<C_COMPILER_ID:MSVC>:${DISABLED_WARNINGS_FLAGS};${QPL_WINDOWS_TOOLCHAIN_REQUIRED_FLAGS}>"
                        "$<$<CONFIG:Debug>:>"
                        "$<$<CONFIG:Release>:>")
 

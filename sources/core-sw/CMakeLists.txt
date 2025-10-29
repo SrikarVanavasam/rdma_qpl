@@ -33,6 +33,8 @@ foreach(PLATFORM_ID IN LISTS PLATFORMS_LIST)
      # Create library
      add_library(qplcore_${PLATFORM_ID} OBJECT ${SOURCES})
 
+     qpl_set_common_target_settings(qplcore_${PLATFORM_ID})
+
      set_property(GLOBAL APPEND PROPERTY QPL_LIB_DEPS
                  $<TARGET_OBJECTS:qplcore_${PLATFORM_ID}>)
 
@@ -85,6 +87,8 @@ file(GLOB SW_DISPATCHER_SOURCES
 
 add_library(qplcore_sw_dispatcher OBJECT
             ${SW_DISPATCHER_SOURCES})
+
+qpl_set_common_target_settings(qplcore_sw_dispatcher)
 
 set_property(GLOBAL APPEND PROPERTY QPL_LIB_DEPS
              $<TARGET_OBJECTS:qplcore_sw_dispatcher>)

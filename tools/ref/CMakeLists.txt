@@ -18,6 +18,8 @@ file(GLOB QPL_C_SRC *.c)
 # Adding library target
 add_library(qplref STATIC ${QPL_C_SRC})
 
+qpl_set_common_target_settings(qplref)
+
 # Setting external and internal interfaces for reference library
 target_include_directories(qplref
                            PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -28,8 +30,6 @@ set_target_properties(qplref PROPERTIES
 
 target_compile_options(qplref PUBLIC
                        "$<$<CONFIG:Debug>:>"
-                       "$<$<CONFIG:Release>:>"
-                       PRIVATE "$<$<C_COMPILER_ID:GNU>:-Werror>"
-                       PRIVATE "$<$<C_COMPILER_ID:MSVC>:/WX>")
+                       "$<$<CONFIG:Release>:>")
 
 target_compile_definitions(qplref PUBLIC REF_BAD_ARG_CHECK)

@@ -27,6 +27,8 @@ file(GLOB MIDDLE_LAYER_SRC accelerator/*.cpp
 add_library(middle_layer_lib OBJECT
         ${MIDDLE_LAYER_SRC})
 
+qpl_set_common_target_settings(middle_layer_lib)
+
 set_property(GLOBAL APPEND PROPERTY QPL_LIB_DEPS
              $<TARGET_OBJECTS:middle_layer_lib>)
 

@@ -12,6 +12,8 @@ file(GLOB SOURCES *.cpp)
 
 add_library(tool_common STATIC ${SOURCES})
 
+qpl_set_common_target_settings(tool_common)
+
 target_include_directories(tool_common
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         PRIVATE $<TARGET_PROPERTY:tool_hw_dispatcher,INTERFACE_INCLUDE_DIRECTORIES>
@@ -29,8 +31,8 @@ target_link_libraries(tool_common
 target_compile_options(tool_common
         PRIVATE $<$<CONFIG:Debug>:>
         PRIVATE $<$<CONFIG:Release>:>
-        PRIVATE $<$<C_COMPILER_ID:GNU>:-m64;-Werror>
-        PRIVATE $<$<C_COMPILER_ID:MSVC>:/WX; /wd4996>)
+        PRIVATE $<$<C_COMPILER_ID:GNU>:-m64>
+        PRIVATE $<$<C_COMPILER_ID:MSVC>:/wd4996>)
 
 if (WIN32)
     target_compile_definitions(tool_common PUBLIC
