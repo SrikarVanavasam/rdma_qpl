@@ -36,7 +36,8 @@ configure_file("${qpl_versions_header_path}.in" "${qpl_versions_header_path}" @O
 target_include_directories(qpl_c_api
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         PUBLIC $<BUILD_INTERFACE:${QPL_PROJECT_DIR}/include/> $<INSTALL_INTERFACE:include>
-        PRIVATE $<TARGET_PROPERTY:middle_layer_lib,INTERFACE_INCLUDE_DIRECTORIES>)
+        PRIVATE $<TARGET_PROPERTY:middle_layer_lib,INTERFACE_INCLUDE_DIRECTORIES>
+        PUBLIC ${QPL_PROJECT_DIR}/sources/core-sw/dispatcher)
 
 set_target_properties(qpl_c_api PROPERTIES
         C_VISIBILITY_PRESET hidden

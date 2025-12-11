@@ -10,8 +10,15 @@
  */
 
 #include <unordered_map>
+#include <cstdlib> // For getenv
+#include <cstring> // For memcpy
+#include <new>     // For std::nothrow
+#include <iostream>
+#include <ostream>
 
 #include "dispatcher/hw_dispatcher.hpp"
+#include "rdma_client.hpp" // RDMA Client
+#include "rdma_protocol.hpp" // For QPL_RDMA_REMOTE_NUMA_ID
 #include "hw_definitions.h"
 #include "hw_descriptors_api.h"
 #include "util/hw_timing_util.hpp"
@@ -31,6 +38,98 @@ static const std::unordered_map<hw_accelerator_status, uint8_t> hw_status_to_pri
 
 extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specified_numa_id,
                                                        qpl::ml::util::execution_record_ext_t* record) {
+    if (user_specified_numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID) {
+        static bool rdma_client_initialized = false;
+        static qpl::ml::dispatcher::RdmaClient* rdma_client_instance = nullptr;
+
+        if (!rdma_client_initialized) {
+            if (const char* env_ip = std::getenv("QPL_RDMA_SERVER_IP")) {
+                rdma_client_instance = &qpl::ml::dispatcher::RdmaClient::get_instance();
+                if (!rdma_client_instance->initialize(env_ip)) {
+                    std::cerr << "[QPL] Failed to initialize RDMA client to " << env_ip << std::endl;
+                    return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
+                }
+                rdma_client_initialized = true;
+            } else {
+                std::cerr << "[QPL] QPL_RDMA_REMOTE_NUMA_ID used but QPL_RDMA_SERVER_IP not set." << std::endl;
+                return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
+            }
+        }
+        
+        // Ensure client is initialized before proceeding with RDMA operations
+        if (!rdma_client_instance || !rdma_client_instance->is_initialized()) {
+            return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
+        }
+
+        auto& client = *rdma_client_instance;
+        int slot_id = client.get_job_slot();
+        
+        if (slot_id < 0) {
+            std::cerr << "[QPL] No free RDMA job slots available." << std::endl;
+            return HW_ACCELERATOR_WQ_IS_BUSY; // Indicates temporary busyness
+        }
+
+        auto* desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(desc_ptr); // Common descriptor fields
+        auto* comp_local = reinterpret_cast<hw_completion_record*>(desc->completion_record_ptr);
+
+        // 1. RDMA Write Input Data (Src1)
+        // Check desc->src1_ptr and desc->src1_size
+        if (desc->src1_ptr && desc->src1_size > 0) {
+            uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
+            if (!client.rdma_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey())) {
+                std::cerr << "[QPL] Failed RDMA write for Src1." << std::endl;
+                client.release_job_slot(slot_id);
+                return HW_ACCELERATOR_WQ_IS_BUSY;
+            }
+        }
+
+        // 2. RDMA Write Input Data (Src2 / AECS)
+        // Check desc->src2_ptr and desc->src2_size
+        if (desc->src2_ptr && desc->src2_size > 0) {
+             uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
+             if (!client.rdma_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey())) {
+                std::cerr << "[QPL] Failed RDMA write for Src2." << std::endl;
+                client.release_job_slot(slot_id);
+                return HW_ACCELERATOR_WQ_IS_BUSY;
+             }
+        }
+
+        // 3. Allocate persistent buffer for descriptor
+        uint8_t* persistent_desc_buf = new (std::nothrow) uint8_t[64];
+        if (!persistent_desc_buf) {
+            client.release_job_slot(slot_id);
+            return HW_ACCELERATOR_WQ_IS_BUSY;
+        }
+        std::memcpy(persistent_desc_buf, desc_ptr, 64);
+        
+        // 4. Patch Remote Descriptor with remote addresses
+        auto* remote_desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(persistent_desc_buf);
+        if (desc->src1_ptr) remote_desc->src1_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 0));
+        if (desc->src2_ptr) remote_desc->src2_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 1));
+        if (desc->dst_ptr)  remote_desc->dst_ptr  = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 2));
+        remote_desc->completion_record_ptr = reinterpret_cast<uint8_t*>(client.get_remote_comp_addr(slot_id));
+
+        // 5. RDMA Write Descriptor to Remote Portal (non-blocking)
+        if (!client.rdma_write(persistent_desc_buf, 64, client.get_remote_portal_addr(), client.get_remote_portal_rkey())) {
+            std::cerr << "[QPL] Failed RDMA write for descriptor to portal." << std::endl;
+            delete[] persistent_desc_buf; // Clean up on failure
+            client.release_job_slot(slot_id);
+            return HW_ACCELERATOR_WQ_IS_BUSY;
+        }
+        
+        // 6. Stash State in Local Completion Record Padding
+        static_assert(sizeof(void*) == 8, "Expected 64-bit system for pointer storage.");
+        static_assert(sizeof(int) == 4, "Expected 32-bit int.");
+        
+        // Use bytes[52] for slot_id (4 bytes) and bytes[56] for ptr (8 bytes)
+        *reinterpret_cast<int*>(&comp_local->bytes[52]) = slot_id;
+        *reinterpret_cast<uint8_t**>(&comp_local->bytes[56]) = persistent_desc_buf;
+        
+        std::cout << "[QPL] RDMA Job submitted with slot: " << slot_id << std::endl;
+        return HW_ACCELERATOR_STATUS_OK;
+    }
+    // --- END RDMA SUBMISSION LOGIC ---
+
     hw_accelerator_status result = HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
 
 #if defined(__linux__)

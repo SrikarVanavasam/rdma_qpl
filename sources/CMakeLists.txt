@@ -18,6 +18,9 @@ add_subdirectory(middle-layer)
 #   User API
 add_subdirectory(c_api)
 
+#   RDMA Server (new)
+add_subdirectory(rdma_server)
+
 # Build and install the resulting library
 get_property(LIB_DEPS GLOBAL PROPERTY QPL_LIB_DEPS)
 
@@ -35,6 +38,9 @@ if (DYNAMIC_LOADING_LIBACCEL_CONFIG)
 else()
     target_link_libraries(qpl PRIVATE "$<$<PLATFORM_ID:Linux>:accel-config>")
 endif()
+
+# RDMA libraries
+target_link_libraries(qpl PRIVATE rdmacm ibverbs)
 
 # C++ filesystem library (used in middle-layer) requires additional linking for older GNU/Clang
 target_link_libraries(qpl PRIVATE $<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_LESS:$<CXX_COMPILER_VERSION>,9.1>>:stdc++fs>)

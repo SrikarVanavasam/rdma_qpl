@@ -69,7 +69,8 @@ target_include_directories(middle_layer_lib
         PRIVATE $<TARGET_PROPERTY:qpl_c_api,INTERFACE_INCLUDE_DIRECTORIES>
         PUBLIC $<TARGET_PROPERTY:qplcore_sw_dispatcher,INTERFACE_INCLUDE_DIRECTORIES>
         PUBLIC $<TARGET_PROPERTY:isal,INTERFACE_INCLUDE_DIRECTORIES>
-        PUBLIC $<TARGET_PROPERTY:core_iaa,INTERFACE_INCLUDE_DIRECTORIES>)
+        PUBLIC $<TARGET_PROPERTY:core_iaa,INTERFACE_INCLUDE_DIRECTORIES>
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../c_api/legacy_hw_path)
 
 target_compile_definitions(middle_layer_lib PUBLIC -DQPL_LIB)
 

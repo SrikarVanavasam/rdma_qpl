@@ -9,6 +9,8 @@
  * @brief Internal HW API functions for @ref hw_check_job API implementation
  */
 
+#include <iostream>
+
 #include "common/defs.hpp"
 #include "compression/deflate/compression_units/stored_block_units.hpp"
 #include "compression/dictionary/dictionary_utils.hpp"
@@ -361,14 +363,92 @@ qpl_status hw_check_compress_job(qpl_job* qpl_job_ptr) {
 
 } // namespace qpl::ml
 
+#include <iostream> // For std::cerr
+#include "rdma_client.hpp"
+#include "rdma_protocol.hpp" // For QPL_RDMA_REMOTE_NUMA_ID
+
 extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
     using namespace qpl;
 
     auto* const state_ptr = reinterpret_cast<qpl_hw_state*>(job::get_state(qpl_job_ptr));
 
     const auto* desc_ptr = &state_ptr->desc_ptr;
-    const auto* comp_ptr = &state_ptr->comp_ptr;
-    auto*       cfg_ptr  = GET_DCFG(state_ptr);
+    auto* comp_ptr = &state_ptr->comp_ptr; // QPL's internal completion record struct
+    auto* comp_base = reinterpret_cast<hw_completion_record*>(comp_ptr); // Generic completion record for padding access
+    auto* cfg_ptr  = GET_DCFG(state_ptr);
+
+    // --- RDMA INTERCEPTION ---
+    if (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID) {
+        // This is an RDMA job, so we need to poll the remote completion record.
+        static qpl::ml::dispatcher::RdmaClient* rdma_client_instance = nullptr;
+
+        // Initialize RdmaClient lazily if not already
+        if (!rdma_client_instance || !rdma_client_instance->is_initialized()) {
+            if (const char* env_ip = std::getenv("QPL_RDMA_SERVER_IP")) {
+                rdma_client_instance = &qpl::ml::dispatcher::RdmaClient::get_instance();
+                if (!rdma_client_instance->initialize(env_ip)) {
+                    std::cerr << "[QPL] Failed to re-initialize RDMA client in check_job." << std::endl;
+                    return QPL_STS_INIT_HW_NOT_SUPPORTED;
+                }
+            } else {
+                std::cerr << "[QPL] QPL_RDMA_REMOTE_NUMA_ID used but QPL_RDMA_SERVER_IP not set in check_job." << std::endl;
+                return QPL_STS_INIT_HW_NOT_SUPPORTED;
+            }
+        }
+        
+        auto& client = *rdma_client_instance;
+
+        // Retrieve stash from local completion record
+        int slot_id = *reinterpret_cast<int*>(&comp_base->bytes[52]);
+        uint8_t* desc_buf_ptr = *reinterpret_cast<uint8_t**>(&comp_base->bytes[56]);
+
+        // 1. Poll Completion (Blocking RDMA Read)
+        uint64_t remote_comp_addr = client.get_remote_comp_addr(slot_id);
+        if (!client.rdma_read(comp_ptr, sizeof(*comp_ptr), remote_comp_addr, client.get_remote_comp_rkey())) {
+            std::cerr << "[QPL] Failed RDMA read for remote completion record." << std::endl;
+            // Attempt cleanup on read failure before returning error
+            if (desc_buf_ptr) delete[] desc_buf_ptr;
+            client.release_job_slot(slot_id);
+            return QPL_STS_LIBRARY_INTERNAL_ERR;
+        }
+
+        // 2. Check Status of the *remote* job (now copied into local comp_ptr)
+        if (comp_ptr->status == 0) { // AD_STATUS_INPROG is 0 in QPL internal definitions
+            return QPL_STS_BEING_PROCESSED;
+        }
+
+        // 3. Handle Completion Result
+        qpl_status final_status = QPL_STS_OK;
+        if (comp_ptr->status == AD_STATUS_SUCCESS) {
+            // Read Output Data
+            uint32_t output_size = comp_ptr->output_size;
+            if (output_size > 0 && qpl_job_ptr->next_out_ptr != nullptr) {
+                uint64_t remote_dst_addr = client.get_remote_data_block_addr(slot_id, 2);
+                if (!client.rdma_read(qpl_job_ptr->next_out_ptr, output_size, remote_dst_addr, client.get_remote_data_block_rkey())) {
+                    std::cerr << "[QPL] Failed RDMA read for remote output data." << std::endl;
+                    final_status = QPL_STS_LIBRARY_INTERNAL_ERR;
+                }
+            }
+            
+            // Update Job structure based on remote completion
+            qpl_job_ptr->total_out = output_size; 
+            qpl_job_ptr->crc = comp_ptr->crc;
+            qpl_job_ptr->xor_checksum = comp_ptr->xor_checksum;
+            qpl_job_ptr->total_in = comp_ptr->bytes_completed;
+            final_status = QPL_STS_OK;
+        } else {
+            // Error case: Convert hardware error status to QPL status
+            std::cerr << "[QPL] Remote job completed with error status: " << (int)comp_ptr->status << std::endl;
+            final_status = static_cast<qpl_status>(ml::util::convert_status_iaa_to_qpl(reinterpret_cast<const hw_completion_record*>(comp_ptr)));
+        }
+
+        // Cleanup
+        if (desc_buf_ptr) delete[] desc_buf_ptr;
+        client.release_job_slot(slot_id);
+        
+        return final_status;
+    }
+    // --- END RDMA INTERCEPTION ---
 
     if (!job::is_job_submitted(qpl_job_ptr)) { return QPL_STS_JOB_NOT_SUBMITTED; }
 

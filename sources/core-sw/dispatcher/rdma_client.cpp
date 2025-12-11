@@ -1,0 +1,226 @@
+#include "rdma_client.hpp"
+
+#include <iostream>
+#include <arpa/inet.h>
+#include <netdb.h> 
+#include <cstring>
+#include <climits> 
+
+#ifndef IBV_ACCESS_ON_DEMAND
+#define IBV_ACCESS_ON_DEMAND (1 << 6) 
+#endif
+
+namespace qpl::ml::dispatcher {
+
+RdmaClient& RdmaClient::get_instance() {
+    static RdmaClient instance;
+    return instance;
+}
+
+RdmaClient::RdmaClient() = default;
+
+RdmaClient::~RdmaClient() {
+    if (initialized_) {
+        cleanup_rdma_resources();
+    }
+}
+
+void RdmaClient::cleanup_rdma_resources() {
+    if (send_mr_) { ibv_dereg_mr(send_mr_); send_mr_ = nullptr; }
+    if (qp_) { rdma_destroy_qp(cm_id_); qp_ = nullptr; }
+    if (cq_) { ibv_destroy_cq(cq_); cq_ = nullptr; }
+    if (pd_) { ibv_dealloc_pd(pd_); pd_ = nullptr; }
+    if (cm_id_) { rdma_destroy_id(cm_id_); cm_id_ = nullptr; }
+    if (ec_) { rdma_destroy_event_channel(ec_); ec_ = nullptr; }
+
+    initialized_ = false;
+    std::cout << "[RdmaClient] RDMA resources cleaned up." << std::endl;
+}
+
+bool RdmaClient::initialize(const std::string& server_ip) {
+    if (initialized_) return true;
+
+    server_ip_ = server_ip;
+    std::cout << "[RdmaClient] Initializing ODP connection to " << server_ip_ << std::endl;
+
+    ec_ = rdma_create_event_channel();
+    if (!ec_) return false;
+
+    if (rdma_create_id(ec_, &cm_id_, NULL, RDMA_PS_TCP)) {
+        cleanup_rdma_resources();
+        return false;
+    }
+
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(rdma::SERVER_PORT);
+    inet_pton(AF_INET, server_ip_.c_str(), &addr.sin_addr);
+
+    if (rdma_resolve_addr(cm_id_, NULL, (struct sockaddr*)&addr, 2000)) {
+        cleanup_rdma_resources();
+        return false;
+    }
+
+    struct rdma_cm_event* event = nullptr;
+    if (rdma_get_cm_event(ec_, &event)) { cleanup_rdma_resources(); return false; }
+    rdma_ack_cm_event(event); 
+
+    if (rdma_resolve_route(cm_id_, 2000)) { cleanup_rdma_resources(); return false; }
+    if (rdma_get_cm_event(ec_, &event)) { cleanup_rdma_resources(); return false; }
+    rdma_ack_cm_event(event); 
+
+    pd_ = ibv_alloc_pd(cm_id_->verbs);
+    if (!pd_) { cleanup_rdma_resources(); return false; }
+
+    send_mr_ = ibv_reg_mr(pd_, NULL, SIZE_MAX, 
+                          IBV_ACCESS_LOCAL_WRITE | 
+                          IBV_ACCESS_REMOTE_READ | 
+                          IBV_ACCESS_REMOTE_WRITE | 
+                          IBV_ACCESS_ON_DEMAND);
+    
+    if (!send_mr_) {
+        std::cerr << "[RdmaClient] Failed to register ODP MR: " << strerror(errno) << std::endl;
+        std::cerr << "             Ensure your device and kernel support On-Demand Paging." << std::endl;
+        cleanup_rdma_resources();
+        return false;
+    }
+
+    cq_ = ibv_create_cq(cm_id_->verbs, rdma::NUM_JOBS * 4, NULL, NULL, 0);
+    if (!cq_) { cleanup_rdma_resources(); return false; }
+
+    struct ibv_qp_init_attr qp_attr = {};
+    qp_attr.send_cq = cq_;
+    qp_attr.recv_cq = cq_;
+    qp_attr.cap.max_send_wr = rdma::NUM_JOBS * 4;
+    qp_attr.cap.max_recv_wr = 1;
+    qp_attr.cap.max_send_sge = 1;
+    qp_attr.cap.max_recv_sge = 1;
+    qp_attr.qp_type = IBV_QPT_RC;
+
+    if (rdma_create_qp(cm_id_, pd_, &qp_attr)) { cleanup_rdma_resources(); return false; }
+    qp_ = cm_id_->qp;
+
+    struct rdma_conn_param cm_params = {};
+    cm_params.initiator_depth = 1;
+    cm_params.responder_resources = 1;
+    cm_params.retry_count = 7;
+    
+    if (rdma_connect(cm_id_, &cm_params)) { cleanup_rdma_resources(); return false; }
+    if (rdma_get_cm_event(ec_, &event)) { cleanup_rdma_resources(); return false; }
+    
+    if (event->event != RDMA_CM_EVENT_ESTABLISHED) {
+        rdma_ack_cm_event(event);
+        cleanup_rdma_resources();
+        return false;
+    }
+
+    if (event->param.conn.private_data_len != sizeof(rdma::ConnPrivateData)) {
+        std::cerr << "[RdmaClient] Mismatch in private data size. Expected " << sizeof(rdma::ConnPrivateData) 
+                  << ", got " << (int)event->param.conn.private_data_len << std::endl;
+        rdma_ack_cm_event(event);
+        cleanup_rdma_resources();
+        return false;
+    }
+    remote_config_ = *reinterpret_cast<const rdma::ConnPrivateData*>(event->param.conn.private_data);
+    rdma_ack_cm_event(event);
+
+    std::cout << "[RdmaClient] Connected to server. Remote config received." << std::endl;
+    std::cout << "  Portal: 0x" << std::hex << remote_config_.portal_addr << " (rkey: 0x" << remote_config_.portal_rkey << ")" << std::dec << std::endl;
+    std::cout << "  Data Pool: 0x" << std::hex << remote_config_.data_pool_addr << " (rkey: 0x" << remote_config_.data_pool_rkey << ")" << std::dec << " (count: " << remote_config_.data_pool_count << ")" << std::endl;
+    std::cout << "  Comp Pool: 0x" << std::hex << remote_config_.comp_pool_addr << " (rkey: 0x" << remote_config_.comp_pool_rkey << ")" << std::dec << " (count: " << remote_config_.comp_pool_count << ")" << std::endl;
+
+    std::lock_guard<std::mutex> lock(slot_mutex_);
+    for (uint32_t i = 0; i < rdma::NUM_JOBS; ++i) {
+        free_job_slots_.push(i);
+    }
+
+    initialized_ = true;
+    std::cout << "[RdmaClient] RDMA ODP Connection Established." << std::endl;
+    return true;
+}
+
+int RdmaClient::get_job_slot() {
+    std::lock_guard<std::mutex> lock(slot_mutex_);
+    if (free_job_slots_.empty()) return -1;
+    int slot_id = free_job_slots_.top();
+    free_job_slots_.pop();
+    return slot_id;
+}
+
+void RdmaClient::release_job_slot(int slot_id) {
+    std::lock_guard<std::mutex> lock(slot_mutex_);
+    if (slot_id >= 0 && static_cast<uint32_t>(slot_id) < rdma::NUM_JOBS) free_job_slots_.push(slot_id);
+}
+
+bool RdmaClient::rdma_write(const void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey) {
+    struct ibv_sge sge = {};
+    sge.addr = reinterpret_cast<uint64_t>(const_cast<void*>(local_addr));
+    sge.length = static_cast<uint32_t>(size);
+    sge.lkey = send_mr_->lkey;
+
+    struct ibv_send_wr wr = {};
+    wr.wr_id = 0;
+    wr.opcode = IBV_WR_RDMA_WRITE;
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.wr.rdma.remote_addr = remote_addr;
+    wr.wr.rdma.rkey = rkey;
+
+    struct ibv_send_wr* bad_wr = nullptr;
+    if (ibv_post_send(qp_, &wr, &bad_wr)) return false;
+    
+    return true;
+}
+
+bool RdmaClient::rdma_read(void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey) {
+    struct ibv_sge sge = {};
+    sge.addr = reinterpret_cast<uint64_t>(local_addr);
+    sge.length = static_cast<uint32_t>(size);
+    sge.lkey = send_mr_->lkey;
+
+    struct ibv_send_wr wr = {};
+    wr.wr_id = 1;
+    wr.opcode = IBV_WR_RDMA_READ;
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.wr.rdma.remote_addr = remote_addr;
+    wr.wr.rdma.rkey = rkey;
+
+    struct ibv_send_wr* bad_wr = nullptr;
+    if (ibv_post_send(qp_, &wr, &bad_wr)) return false;
+
+    struct ibv_wc wc;
+    int completions = 0;
+    do {
+        completions = ibv_poll_cq(cq_, 1, &wc);
+    } while (completions == 0);
+
+    if (completions < 0 || wc.status != IBV_WC_SUCCESS) {
+        std::cerr << "RDMA Read Failed: " << ibv_wc_status_str(wc.status) << std::endl;
+        return false;
+    }
+    
+    while (wc.wr_id != 1) {
+         do { completions = ibv_poll_cq(cq_, 1, &wc); } while (completions == 0);
+         if (wc.status != IBV_WC_SUCCESS) return false;
+    }
+
+    return true;
+}
+
+uint64_t RdmaClient::get_remote_data_block_addr(int slot_id, int block_idx) {
+    return remote_config_.data_pool_addr + (static_cast<uint64_t>(slot_id) * 3 + block_idx) * rdma::BLOCK_SIZE;
+}
+uint32_t RdmaClient::get_remote_data_block_rkey() { return remote_config_.data_pool_rkey; }
+
+uint64_t RdmaClient::get_remote_comp_addr(int slot_id) {
+    return remote_config_.comp_pool_addr + static_cast<uint64_t>(slot_id) * rdma::COMP_SIZE;
+}
+uint32_t RdmaClient::get_remote_comp_rkey() { return remote_config_.comp_pool_rkey; }
+
+uint64_t RdmaClient::get_remote_portal_addr() { return remote_config_.portal_addr; }
+uint32_t RdmaClient::get_remote_portal_rkey() { return remote_config_.portal_rkey; }
+
+} // namespace
