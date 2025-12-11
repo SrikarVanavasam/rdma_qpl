@@ -11,7 +11,6 @@
 #include <infiniband/verbs.h>
 
 #include "rdma_protocol.hpp"
-#include "qpl/c_api/job.h" // For qpl_job_ptr
 
 namespace qpl::ml::dispatcher {
 
