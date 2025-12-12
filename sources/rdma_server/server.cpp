@@ -1,16 +1,16 @@
-#include <iostream>
-#include <vector>
-#include <string>
-#include <cstring>
-#include <cstdlib>
+#include <arpa/inet.h>
 #include <cstdio>
-#include <unistd.h>
+#include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
+#include <infiniband/verbs.h>
+#include <iostream>
+#include <rdma/rdma_cma.h>
+#include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <arpa/inet.h>
-#include <rdma/rdma_cma.h>
-#include <infiniband/verbs.h>
+#include <unistd.h>
+#include <vector>
 
 #include "rdma_protocol.hpp"
 
@@ -18,25 +18,25 @@ using namespace qpl::rdma;
 
 struct ServerContext {
     std::string dev_path;
-    
+
     // Portal
-    void* portal_buf = nullptr;
-    struct ibv_mr* mr_portal = nullptr;
+    void*          portal_buf = nullptr;
+    struct ibv_mr* mr_portal  = nullptr;
 
     // Data Pool
-    void* data_pool_buf = nullptr;
-    size_t data_pool_size = 0;
-    struct ibv_mr* mr_data_pool = nullptr;
+    void*          data_pool_buf  = nullptr;
+    size_t         data_pool_size = 0;
+    struct ibv_mr* mr_data_pool   = nullptr;
 
     // Completion Pool
-    void* comp_pool_buf = nullptr;
-    size_t comp_pool_size = 0;
-    struct ibv_mr* mr_comp_pool = nullptr;
+    void*          comp_pool_buf  = nullptr;
+    size_t         comp_pool_size = 0;
+    struct ibv_mr* mr_comp_pool   = nullptr;
 
     // RDMA Resources
     struct rdma_cm_id* listen_id = nullptr;
-    struct rdma_cm_id* cm_id = nullptr; // Active connection
-    struct ibv_pd* pd = nullptr;
+    struct rdma_cm_id* cm_id     = nullptr; // Active connection
+    struct ibv_pd*     pd        = nullptr;
 };
 
 static void die(const std::string& reason) {
@@ -65,9 +65,9 @@ static int on_connect_request(struct rdma_cm_id* id, ServerContext* ctx) {
     if (!ctx->mr_data_pool) die("ibv_reg_mr data pool");
 
     // Comp Pool: Local Write (Init), Remote Write (Completion from IAA), Remote Read (Polling)
-    // IMPORTANT: The IAA hardware writes to this. Does it need REMOTE_WRITE? 
+    // IMPORTANT: The IAA hardware writes to this. Does it need REMOTE_WRITE?
     // Usually Hardware writes are "Local" from the device's perspective, but for RDMA access...
-    // The *Client* will RDMA READ this. 
+    // The *Client* will RDMA READ this.
     // The *IAA* (Device) writes to this via DMA.
     // So IBV_ACCESS_REMOTE_READ is essential.
     ctx->mr_comp_pool = ibv_reg_mr(ctx->pd, ctx->comp_pool_buf, ctx->comp_pool_size,
@@ -76,34 +76,34 @@ static int on_connect_request(struct rdma_cm_id* id, ServerContext* ctx) {
 
     // 3. Create Queue Pair
     struct ibv_qp_init_attr qp_attr = {};
-    qp_attr.qp_context = ctx;
-    qp_attr.cap.max_send_wr = 16;
-    qp_attr.cap.max_recv_wr = 16;
-    qp_attr.cap.max_send_sge = 1;
-    qp_attr.cap.max_recv_sge = 1;
-    qp_attr.qp_type = IBV_QPT_RC;
+    qp_attr.qp_context              = ctx;
+    qp_attr.cap.max_send_wr         = 16;
+    qp_attr.cap.max_recv_wr         = 16;
+    qp_attr.cap.max_send_sge        = 1;
+    qp_attr.cap.max_recv_sge        = 1;
+    qp_attr.qp_type                 = IBV_QPT_RC;
 
     if (rdma_create_qp(id, ctx->pd, &qp_attr)) die("rdma_create_qp");
 
     // 4. Accept with Private Data
     struct rdma_conn_param cm_params = {};
-    ConnPrivateData pdata = {};
+    ConnPrivateData        pdata     = {};
 
     pdata.portal_addr = (uint64_t)ctx->portal_buf;
     pdata.portal_rkey = ctx->mr_portal->rkey;
 
-    pdata.data_pool_addr = (uint64_t)ctx->data_pool_buf;
-    pdata.data_pool_rkey = ctx->mr_data_pool->rkey;
+    pdata.data_pool_addr  = (uint64_t)ctx->data_pool_buf;
+    pdata.data_pool_rkey  = ctx->mr_data_pool->rkey;
     pdata.data_pool_count = NUM_JOBS * 3; // 3 blocks per job
 
-    pdata.comp_pool_addr = (uint64_t)ctx->comp_pool_buf;
-    pdata.comp_pool_rkey = ctx->mr_comp_pool->rkey;
+    pdata.comp_pool_addr  = (uint64_t)ctx->comp_pool_buf;
+    pdata.comp_pool_rkey  = ctx->mr_comp_pool->rkey;
     pdata.comp_pool_count = NUM_JOBS;
 
-    cm_params.private_data = &pdata;
-    cm_params.private_data_len = sizeof(pdata);
+    cm_params.private_data        = &pdata;
+    cm_params.private_data_len    = sizeof(pdata);
     cm_params.responder_resources = 1;
-    cm_params.initiator_depth = 1;
+    cm_params.initiator_depth     = 1;
 
     if (rdma_accept(id, &cm_params)) die("rdma_accept");
 
@@ -113,15 +113,27 @@ static int on_connect_request(struct rdma_cm_id* id, ServerContext* ctx) {
 
 static int on_disconnect(struct rdma_cm_id* id, ServerContext* ctx) {
     std::cout << "[Server] Client disconnected." << std::endl;
-    
+
     rdma_destroy_qp(id);
-    
-    if (ctx->mr_portal) { ibv_dereg_mr(ctx->mr_portal); ctx->mr_portal = nullptr; }
-    if (ctx->mr_data_pool) { ibv_dereg_mr(ctx->mr_data_pool); ctx->mr_data_pool = nullptr; }
-    if (ctx->mr_comp_pool) { ibv_dereg_mr(ctx->mr_comp_pool); ctx->mr_comp_pool = nullptr; }
-    
-    if (ctx->pd) { ibv_dealloc_pd(ctx->pd); ctx->pd = nullptr; }
-    
+
+    if (ctx->mr_portal) {
+        ibv_dereg_mr(ctx->mr_portal);
+        ctx->mr_portal = nullptr;
+    }
+    if (ctx->mr_data_pool) {
+        ibv_dereg_mr(ctx->mr_data_pool);
+        ctx->mr_data_pool = nullptr;
+    }
+    if (ctx->mr_comp_pool) {
+        ibv_dereg_mr(ctx->mr_comp_pool);
+        ctx->mr_comp_pool = nullptr;
+    }
+
+    if (ctx->pd) {
+        ibv_dealloc_pd(ctx->pd);
+        ctx->pd = nullptr;
+    }
+
     ctx->cm_id = nullptr;
     return 0; // Keep listening
 }
@@ -148,7 +160,7 @@ int main(int argc, char** argv) {
     // 1. Map Portal
     int fd = open(ctx.dev_path.c_str(), O_RDWR);
     if (fd < 0) die("open device");
-    
+
     ctx.portal_buf = mmap(NULL, PORTAL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (ctx.portal_buf == MAP_FAILED) die("mmap portal");
     close(fd); // Can close fd after mmap
@@ -157,8 +169,7 @@ int main(int argc, char** argv) {
     // Data Pool: 3 blocks per job * NUM_JOBS * BLOCK_SIZE
     ctx.data_pool_size = NUM_JOBS * 3 * BLOCK_SIZE;
     // TODO: Use hugepages for data pool to ensure large pages are used
-    if (posix_memalign(&ctx.data_pool_buf, 2 * 1024 * 1024, ctx.data_pool_size)) 
-        die("posix_memalign data pool");
+    if (posix_memalign(&ctx.data_pool_buf, 2 * 1024 * 1024, ctx.data_pool_size)) die("posix_memalign data pool");
     std::memset(ctx.data_pool_buf, 0, ctx.data_pool_size);
 
     // Comp Pool: NUM_JOBS * COMP_SIZE (64B)
@@ -175,9 +186,9 @@ int main(int argc, char** argv) {
     if (rdma_create_id(ec, &ctx.listen_id, NULL, RDMA_PS_TCP)) die("rdma_create_id");
 
     struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(SERVER_PORT);
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_family         = AF_INET;
+    addr.sin_port           = htons(SERVER_PORT);
+    addr.sin_addr.s_addr    = INADDR_ANY;
 
     if (rdma_bind_addr(ctx.listen_id, (struct sockaddr*)&addr)) die("rdma_bind_addr");
     if (rdma_listen(ctx.listen_id, 1)) die("rdma_listen");
@@ -189,7 +200,7 @@ int main(int argc, char** argv) {
         struct rdma_cm_event event_copy = *event;
         rdma_ack_cm_event(event);
         if (on_event(&event_copy, &ctx)) {
-             // Handle error or break if needed, for now just log
+            // Handle error or break if needed, for now just log
         }
     }
 
@@ -197,7 +208,7 @@ int main(int argc, char** argv) {
     if (ctx.data_pool_buf) free(ctx.data_pool_buf);
     if (ctx.comp_pool_buf) free(ctx.comp_pool_buf);
     if (ctx.portal_buf) munmap(ctx.portal_buf, PORTAL_SIZE);
-    
+
     rdma_destroy_event_channel(ec);
     rdma_destroy_id(ctx.listen_id);
 

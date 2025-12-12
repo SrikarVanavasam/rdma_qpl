@@ -34,9 +34,15 @@ public:
     // Release a remote job slot ID
     void release_job_slot(int slot_id);
 
-    // Perform an RDMA Write operation
-    bool rdma_write(const void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey);
-    
+    // Prepare an RDMA Write to be batched
+    void prepare_write(const void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey, bool signaled = false);
+
+    // Commit the prepared batch of writes
+    bool commit_batch();
+
+    // Perform an RDMA Write operation (Immediate)
+    bool rdma_write(const void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey, bool signaled = true);
+
     // Perform an RDMA Read operation
     bool rdma_read(void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey);
 
@@ -52,9 +58,18 @@ public:
     uint64_t get_remote_portal_addr();
     uint32_t get_remote_portal_rkey();
 
+    // Get the local descriptor buffer for a specific slot
+    uint8_t* get_local_desc_buffer(int slot_id);
+
 private:
     RdmaClient(); // Private constructor for singleton
     ~RdmaClient();
+
+    // Batching resources
+    static const int MAX_BATCH_SIZE = 8;
+    struct ibv_send_wr wr_batch_[MAX_BATCH_SIZE];
+    struct ibv_sge sge_batch_[MAX_BATCH_SIZE];
+    int batch_idx_ = 0;
 
     // RDMA resources
     struct rdma_event_channel* ec_ = nullptr;
@@ -63,10 +78,12 @@ private:
     struct ibv_cq* cq_ = nullptr;
     struct ibv_qp* qp_ = nullptr;
     
-    // Memory regions for local send/recv buffers
-    // These will be used for transferring data to/from remote
-    struct ibv_mr* send_mr_ = nullptr;
-    struct ibv_mr* recv_mr_ = nullptr;
+    // Memory regions
+    struct ibv_mr* send_mr_ = nullptr; // ODP MR for user data
+    
+    // Local descriptor pool
+    void* local_desc_pool_ = nullptr;
+
     // We'll use a single buffer for small transfers (descriptor, completion)
     // For large data (2MB blocks), we'll need to register client's actual data
     // or copy to a local staging buffer for RDMA. For simplicity in this
