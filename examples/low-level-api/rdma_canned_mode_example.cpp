@@ -68,17 +68,17 @@ auto main(int argc, char** argv) -> int {
     // Huffman table initialization
     qpl_huffman_table_t huffman_table = nullptr;
 
-    // Using software path for table creation (client-side)
-    status = qpl_deflate_huffman_table_create(combined_table_type, qpl_path_software, DEFAULT_ALLOCATOR_C,
+    // Using hardware path for table creation (same as async_canned_mode_example)
+    status = qpl_deflate_huffman_table_create(combined_table_type, execution_path, DEFAULT_ALLOCATOR_C,
                                               &huffman_table);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during Huffman table creation.\n";
         return 1;
     }
 
-    // Filling deflate histogram first (software path)
+    // Filling deflate histogram first (hardware path)
     status = qpl_gather_deflate_statistics(source.data(), source_size, &deflate_histogram, qpl_default_level,
-                                           qpl_path_software);
+                                           execution_path);
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during gathering statistics for Huffman table.\n";
         qpl_huffman_table_destroy(huffman_table);

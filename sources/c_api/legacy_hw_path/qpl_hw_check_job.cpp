@@ -37,6 +37,9 @@
 #include "hw_completion_record_api.h"
 #include "hw_devices.h"
 
+#include "rdma_client.hpp"
+#include "rdma_protocol.hpp"
+
 namespace qpl::ml {
 
 #define AECS_WRITTEN(p) ((((p)->op_code_op_flags >> 18U) & 3U) == AD_WRSRC2_ALWAYS)
@@ -374,11 +377,6 @@ qpl_status hw_check_compress_job(qpl_job* qpl_job_ptr) {
 
 } // namespace qpl::ml
 
-#include <iostream> // For std::cerr
-
-#include "rdma_client.hpp"
-#include "rdma_protocol.hpp" // For QPL_RDMA_REMOTE_NUMA_ID
-
 extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
     // std::cout << "[QPL_HW_CHECK_JOB] Entering hw_check_job for job " << qpl_job_ptr << " with numa_id "
     //           << qpl_job_ptr->numa_id << " available_out: " << qpl_job_ptr->available_out << std::endl;
@@ -387,16 +385,13 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
     auto* const state_ptr = reinterpret_cast<qpl_hw_state*>(job::get_state(qpl_job_ptr));
 
     const auto* desc_ptr = &state_ptr->desc_ptr;
-    auto*       comp_ptr = &state_ptr->comp_ptr;                         // QPL's internal completion record struct
-    auto* comp_base = reinterpret_cast<hw_completion_record*>(comp_ptr); // Generic completion record for padding access
-    auto* cfg_ptr   = GET_DCFG(state_ptr);
+    auto*       comp_ptr = &state_ptr->comp_ptr; // QPL's internal completion record struct
+    auto*       cfg_ptr  = GET_DCFG(state_ptr);
 
     // --- RDMA INTERCEPTION ---
     if (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID) {
-        // This is an RDMA job, so we need to poll the remote completion record.
         static qpl::ml::dispatcher::RdmaClient* rdma_client_instance = nullptr;
 
-        // Initialize RdmaClient lazily if not already
         if (!rdma_client_instance || !rdma_client_instance->is_initialized()) {
             if (const char* env_ip = std::getenv("QPL_RDMA_SERVER_IP")) {
                 rdma_client_instance = &qpl::ml::dispatcher::RdmaClient::get_instance();
@@ -413,24 +408,25 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
 
         auto& client = *rdma_client_instance;
 
-        // Retrieve stash from local completion record
-        int slot_id = *reinterpret_cast<int*>(&comp_base->bytes[52]);
-        // uint8_t* desc_buf_ptr = *reinterpret_cast<uint8_t**>(&comp_base->bytes[56]); // No longer used
+        int slot_id = state_ptr->rdma_slot_id;
+        std::cout << "[QPL_HW_CHECK_JOB] RDMA mode: slot_id=" << slot_id << std::endl;
 
-        // 1. Poll Completion (Blocking RDMA Read)
         uint64_t remote_comp_addr = client.get_remote_comp_addr(slot_id);
+        std::cout << "[QPL_HW_CHECK_JOB] Reading completion from remote addr 0x" << std::hex << remote_comp_addr
+                  << std::dec << std::endl;
         if (!client.rdma_read(comp_ptr, sizeof(*comp_ptr), remote_comp_addr, client.get_remote_comp_rkey())) {
             std::cerr << "[QPL] Failed RDMA read for remote completion record." << std::endl;
-            client.release_job_slot(slot_id);
             return QPL_STS_LIBRARY_INTERNAL_ERR;
         }
 
-        // 2. Check Status
+        std::cout << "[QPL_HW_CHECK_JOB] Remote completion status: 0x" << std::hex << (int)comp_ptr->status << std::dec
+                  << std::endl;
         if (comp_ptr->status == 0) { return QPL_STS_BEING_PROCESSED; }
 
-        // 3. Sync Output Data
         uint32_t output_size = comp_ptr->output_size;
-        if (output_size > 0 && qpl_job_ptr->next_out_ptr != nullptr) {
+        bool is_stats_pass = (ADCF_STATS_MODE & desc_ptr->decomp_flags);
+        
+        if (output_size > 0 && qpl_job_ptr->next_out_ptr != nullptr && !is_stats_pass) {
             uint32_t copy_size = output_size;
             if (output_size > qpl_job_ptr->available_out) {
                 std::cerr << "[QPL] Warning: Output overflow! Size " << output_size << " > Available "
@@ -438,16 +434,22 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
                 copy_size = qpl_job_ptr->available_out;
             }
             uint64_t remote_dst_addr = client.get_remote_data_block_addr(slot_id, 2);
+            std::cout << "[QPL_HW_CHECK_JOB] Reading " << copy_size << " bytes of output from remote 0x" 
+                      << std::hex << remote_dst_addr << " to local 0x" 
+                      << (uintptr_t)qpl_job_ptr->next_out_ptr << std::dec << std::endl;
             if (!client.rdma_read(qpl_job_ptr->next_out_ptr, copy_size, remote_dst_addr,
                                   client.get_remote_data_block_rkey())) {
                 std::cerr << "[QPL] Failed RDMA read for remote output data." << std::endl;
-                client.release_job_slot(slot_id);
                 return QPL_STS_LIBRARY_INTERNAL_ERR;
             }
+            std::cout << "[QPL_HW_CHECK_JOB] Output data preview (first 16 bytes): ";
+            for (uint32_t i = 0; i < 16 && i < copy_size; ++i) {
+                std::cout << std::hex << (int)qpl_job_ptr->next_out_ptr[i] << " ";
+            }
+            std::cout << std::dec << std::endl;
+        } else if (is_stats_pass) {
+            std::cout << "[QPL_HW_CHECK_JOB] Stats pass completed, keeping slot " << slot_id << " for compression phase" << std::endl;
         }
-
-        // 4. Cleanup and Fall Through
-        client.release_job_slot(slot_id);
     }
     // --- END RDMA INTERCEPTION ---
 

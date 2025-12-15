@@ -23,6 +23,7 @@
 #include "legacy_hw_path/async_hw_api.h"
 #include "legacy_hw_path/hardware_state.h"
 #include "own_defs.h"
+#include "rdma_client.hpp"
 
 // get_buffer_size functions for middle-layer buffer allocation
 #include "compression/deflate/streams/hw_deflate_state.hpp"
@@ -143,7 +144,17 @@ QPL_FUN(qpl_status, qpl_fini_job, (qpl_job * qpl_job_ptr)) {
     uint32_t status = QPL_STS_OK;
 
     if (qpl_path_software != qpl_job_ptr->data_ptr.path) {
-        status = hw_accelerator_finalize(&((qpl_hw_state*)qpl_job_ptr->data_ptr.hw_state_ptr)->accel_context);
+        auto* hw_state_ptr = (qpl_hw_state*)qpl_job_ptr->data_ptr.hw_state_ptr;
+        
+        if (hw_state_ptr->rdma_slot_id >= 0) {
+            auto& client = qpl::ml::dispatcher::RdmaClient::get_instance();
+            if (client.is_initialized()) {
+                client.release_job_slot(hw_state_ptr->rdma_slot_id);
+            }
+            hw_state_ptr->rdma_slot_id = -1;
+        }
+        
+        status = hw_accelerator_finalize(&hw_state_ptr->accel_context);
     }
 
     return static_cast<qpl_status>(status);
@@ -260,6 +271,7 @@ void own_init_hw_state(qpl_hw_state* hw_state_ptr) {
     core_sw::util::set_zeros((uint8_t*)hw_state_ptr, hw_size);
 
     hw_state_ptr->async_job_status = QPL_STS_JOB_NOT_SUBMITTED;
+    hw_state_ptr->rdma_slot_id = -1;
 }
 
 #ifdef __cplusplus

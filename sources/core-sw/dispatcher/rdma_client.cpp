@@ -289,7 +289,7 @@ bool RdmaClient::rdma_write(const void* local_addr, size_t size, uint64_t remote
     wr.wr_id              = remote_addr;
     wr.opcode             = IBV_WR_RDMA_WRITE;
     wr.send_flags         = signaled ? IBV_SEND_SIGNALED : 0;
-    if (size <= 64) { wr.send_flags |= IBV_SEND_INLINE; }
+    // if (size <= 64) { wr.send_flags |= IBV_SEND_INLINE; }
     wr.sg_list             = &sge;
     wr.num_sge             = 1;
     wr.wr.rdma.remote_addr = remote_addr;

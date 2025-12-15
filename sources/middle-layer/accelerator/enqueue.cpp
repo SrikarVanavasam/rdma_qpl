@@ -15,6 +15,7 @@
 #include <new> // For std::nothrow
 #include <ostream>
 #include <unordered_map>
+#include <cstddef> // For offsetof
 
 #include "dispatcher/hw_dispatcher.hpp"
 #include "hw_definitions.h"
@@ -22,6 +23,7 @@
 #include "rdma_client.hpp"   // RDMA Client
 #include "rdma_protocol.hpp" // For QPL_RDMA_REMOTE_NUMA_ID
 #include "util/hw_timing_util.hpp"
+#include "hardware_state.h"  // For qpl_hw_state and rdma_slot_id
 
 /* If we didn't successfully submit, we need to prioritize the return value
  * Priority is as follows:
@@ -73,11 +75,24 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
 
     // Dump Src2 (AECS) if present
     if (original_desc_content->src2_ptr && original_desc_content->src2_size > 0) {
-        std::cout << "  Src2 (AECS) Data Preview (First 32 bytes):" << std::endl;
-        for (uint32_t i = 0; i < 32 && i < original_desc_content->src2_size; ++i) {
-            std::cout << std::hex << (int)original_desc_content->src2_ptr[i] << (i % 8 == 7 ? "\n" : " ");
+        std::cout << "  Src2 (AECS) Data Preview (First 64 bytes):" << std::endl;
+        for (uint32_t i = 0; i < 64 && i < original_desc_content->src2_size; ++i) {
+            std::cout << std::hex << (int)original_desc_content->src2_ptr[i] << (i % 16 == 15 ? "\n" : " ");
         }
         std::cout << std::dec << std::endl;
+        // Check if there's any non-zero data in the AECS
+        bool has_nonzero = false;
+        for (uint32_t i = 0; i < original_desc_content->src2_size; ++i) {
+            if (original_desc_content->src2_ptr[i] != 0) {
+                has_nonzero = true;
+                std::cout << "  First non-zero byte at offset " << i << ": 0x" << std::hex 
+                          << (int)original_desc_content->src2_ptr[i] << std::dec << std::endl;
+                break;
+            }
+        }
+        if (!has_nonzero) {
+            std::cout << "  WARNING: Src2 (AECS) is entirely zeros!" << std::endl;
+        }
     }
 
     std::cout << "------------------------------------------" << std::endl;
@@ -100,47 +115,67 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
             }
         }
 
-        // Ensure client is initialized before proceeding with RDMA operations
         if (!rdma_client_instance || !rdma_client_instance->is_initialized()) {
             return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
         }
 
-        auto& client  = *rdma_client_instance;
-        int   slot_id = client.get_job_slot();
-
-        if (slot_id < 0) {
-            std::cerr << "[QPL] No free RDMA job slots available." << std::endl;
-            return HW_ACCELERATOR_WQ_IS_BUSY; // Indicates temporary busyness
-        }
-
-        auto* desc       = reinterpret_cast<hw_decompress_analytics_descriptor*>(desc_ptr); // Common descriptor fields
+        auto& client = *rdma_client_instance;
+        auto* desc   = reinterpret_cast<hw_decompress_analytics_descriptor*>(desc_ptr);
         auto* comp_local = reinterpret_cast<hw_completion_record*>(desc->completion_record_ptr);
+        auto* state_ptr = reinterpret_cast<qpl_hw_state*>(
+            reinterpret_cast<char*>(comp_local) - offsetof(qpl_hw_state, comp_ptr));
 
-        // 1. RDMA Write Input Data (Src1)
-        // Check desc->src1_ptr and desc->src1_size
+        int slot_id = state_ptr->rdma_slot_id;
+        bool reusing_slot = (slot_id >= 0);
+
+        if (!reusing_slot) {
+            slot_id = client.get_job_slot();
+            if (slot_id < 0) {
+                std::cerr << "[QPL] No free RDMA job slots available." << std::endl;
+                return HW_ACCELERATOR_WQ_IS_BUSY;
+            }
+            state_ptr->rdma_slot_id = slot_id;
+            state_ptr->rdma_synced_src1 = nullptr;
+            state_ptr->rdma_synced_src2 = nullptr;
+            state_ptr->rdma_synced_dst = nullptr;
+            std::cout << "[QPL] RDMA: Allocated new slot " << slot_id << std::endl;
+        } else {
+            std::cout << "[QPL] RDMA: Reusing existing slot " << slot_id << std::endl;
+        }
+
         if (desc->src1_ptr && desc->src1_size > 0) {
-            uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
-            client.prepare_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(),
-                                 false);
+            if (desc->src1_ptr != state_ptr->rdma_synced_src1) {
+                uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
+                std::cout << "[QPL] RDMA: Writing Src1 (" << desc->src1_size << " bytes, addr changed)" << std::endl;
+                client.prepare_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
+                state_ptr->rdma_synced_src1 = desc->src1_ptr;
+            } else {
+                std::cout << "[QPL] RDMA: Skipping Src1 transfer (addr unchanged: 0x" << std::hex 
+                          << (uintptr_t)desc->src1_ptr << std::dec << ")" << std::endl;
+            }
         }
 
-        // 2. RDMA Write Input Data (Src2 / AECS)
-        // Check desc->src2_ptr and desc->src2_size
         if (desc->src2_ptr && desc->src2_size > 0) {
-            uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
-            client.prepare_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(),
-                                 false);
+            if (desc->src2_ptr != state_ptr->rdma_synced_src2) {
+                uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
+                std::cout << "[QPL] RDMA: Writing Src2/AECS (" << desc->src2_size << " bytes, addr changed)" << std::endl;
+                client.prepare_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
+                state_ptr->rdma_synced_src2 = desc->src2_ptr;
+            } else {
+                std::cout << "[QPL] RDMA: Skipping Src2/AECS transfer (addr unchanged, using remote state)" << std::endl;
+            }
         }
 
-        // 3. Allocate persistent buffer for descriptor
         uint8_t* persistent_desc_buf = client.get_local_desc_buffer(slot_id);
         if (!persistent_desc_buf) {
-            client.release_job_slot(slot_id);
+            if (!reusing_slot) {
+                client.release_job_slot(slot_id);
+                state_ptr->rdma_slot_id = -1;
+            }
             return HW_ACCELERATOR_WQ_IS_BUSY;
         }
         std::memcpy(persistent_desc_buf, desc_ptr, 64);
 
-        // 4. Patch Remote Descriptor with remote addresses
         auto* remote_desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(persistent_desc_buf);
         if (desc->src1_ptr)
             remote_desc->src1_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 0));
@@ -150,48 +185,25 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
             remote_desc->dst_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 2));
         remote_desc->completion_record_ptr = reinterpret_cast<uint8_t*>(client.get_remote_comp_addr(slot_id));
 
-        // 4a. Clear Remote Completion Record
         static uint8_t zero_comp[64] = {0};
         client.prepare_write(zero_comp, 64, client.get_remote_comp_addr(slot_id), client.get_remote_comp_rkey(), false);
 
-        // 5. RDMA Write Descriptor to Remote Portal (non-blocking)
-        std::cout << "[QPL] Patched Remote Descriptor Content (Slot " << slot_id << "):" << std::endl;
-        std::cout << "  Trusted Fields: 0x" << std::hex << (int)remote_desc->trusted_fields << std::dec << std::endl;
-        std::cout << "  Opcode: 0x" << std::hex << (int)remote_desc->op_code_op_flags << std::dec
-                  << std::endl; // Includes op_code
-        std::cout << "  Comp Rec Ptr: 0x" << std::hex << (uintptr_t)remote_desc->completion_record_ptr << std::dec
-                  << std::endl;
-        std::cout << "  Src1 Ptr: 0x" << std::hex << (uintptr_t)remote_desc->src1_ptr << std::dec << std::endl;
-        std::cout << "  Src1 Size: " << remote_desc->src1_size << std::endl;
-        std::cout << "  Dst Ptr: 0x" << std::hex << (uintptr_t)remote_desc->dst_ptr << std::dec << std::endl;
-        std::cout << "  Max Dst Size: " << remote_desc->max_dst_size << std::endl;
-        std::cout << "  Decomp Flags (Compression Flags): 0x" << std::hex << (int)remote_desc->decomp_flags << std::dec
-                  << std::endl;
-        if (remote_desc->src2_ptr) { // Src2 might not always be used
-            std::cout << "  Src2 Ptr: 0x" << std::hex << (uintptr_t)remote_desc->src2_ptr << std::dec << std::endl;
-            std::cout << "  Src2 Size: " << remote_desc->src2_size << std::endl;
-        }
+        std::cout << "[QPL] Patched Remote Descriptor (Slot " << slot_id << ", reuse=" << reusing_slot << "):" << std::endl;
+        std::cout << "  Opcode: 0x" << std::hex << (int)remote_desc->op_code_op_flags << std::dec << std::endl;
+        std::cout << "  Src1: 0x" << std::hex << (uintptr_t)remote_desc->src1_ptr << " size=" << std::dec << remote_desc->src1_size << std::endl;
+        std::cout << "  Src2: 0x" << std::hex << (uintptr_t)remote_desc->src2_ptr << " size=" << std::dec << remote_desc->src2_size << std::endl;
+        std::cout << "  Dst: 0x" << std::hex << (uintptr_t)remote_desc->dst_ptr << " max=" << std::dec << remote_desc->max_dst_size << std::endl;
 
-        std::cout << "[QPL] Writing descriptor to remote Portal at 0x" << std::hex << client.get_remote_portal_addr()
-                  << std::dec << std::endl;
+        client.prepare_write(persistent_desc_buf, 64, client.get_remote_portal_addr(), client.get_remote_portal_rkey(), true);
 
-        // Prepare descriptor write (signaled)
-        client.prepare_write(persistent_desc_buf, 64, client.get_remote_portal_addr(), client.get_remote_portal_rkey(),
-                             true);
-
-        // Commit Batch
         if (!client.commit_batch()) {
             std::cerr << "[QPL] Failed to commit RDMA batch." << std::endl;
-            client.release_job_slot(slot_id);
+            if (!reusing_slot) {
+                client.release_job_slot(slot_id);
+                state_ptr->rdma_slot_id = -1;
+            }
             return HW_ACCELERATOR_WQ_IS_BUSY;
         }
-
-        // 6. Stash State in Local Completion Record Padding
-        static_assert(sizeof(void*) == 8, "Expected 64-bit system for pointer storage.");
-        static_assert(sizeof(int) == 4, "Expected 32-bit int.");
-
-        // Use bytes[52] for slot_id (4 bytes)
-        *reinterpret_cast<int*>(&comp_local->bytes[52]) = slot_id;
 
         std::cout << "[QPL] RDMA Job submitted with slot: " << slot_id << std::endl;
         return HW_ACCELERATOR_STATUS_OK;

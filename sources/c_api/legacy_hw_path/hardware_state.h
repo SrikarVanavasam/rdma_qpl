@@ -86,6 +86,10 @@ typedef struct {
                                                                                 QPL_STS_QUEUES_ARE_BUSY_ERR */
     qpl_status                async_job_status; /**< For asynchronous execution, stores the latest status of the job */
     qpl_execution_record      execution_record; /**< Execution information for logging */
+    int32_t                   rdma_slot_id;     /**< RDMA job slot ID for remote execution */
+    uint8_t*                  rdma_synced_src1; /**< Last src1 address synced to remote */
+    uint8_t*                  rdma_synced_src2; /**< Last src2 address synced to remote (AECS) */
+    uint8_t*                  rdma_synced_dst;  /**< Last dst address synced to remote */
 } qpl_hw_state;
 
 #ifdef __cplusplus
