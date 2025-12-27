@@ -5,6 +5,7 @@ doc/html/*
 .idea/
 .vscode/
 .cproject
+.claude
 .project
 .settings/*
 /tmp

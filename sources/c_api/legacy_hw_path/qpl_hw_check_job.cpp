@@ -285,6 +285,7 @@ qpl_status hw_check_compress_job(qpl_job* qpl_job_ptr) {
                                       ADCF_ENABLE_HDR_GEN(6U) == (ADCF_ENABLE_HDR_GEN(6U) & desc_ptr->decomp_flags) ||
                                       ADCF_ENABLE_HDR_GEN(7U) == (ADCF_ENABLE_HDR_GEN(7U) & desc_ptr->decomp_flags);
 
+    /* DEBUG: Resubmission state
     std::cout << "[QPL_HW_CHECK_JOB] Resubmission Check:" << std::endl;
     std::cout << "  execution_step: " << state_ptr->execution_history.execution_step << std::endl;
     std::cout << "  saved_num_output_accum_bits: " << state_ptr->saved_num_output_accum_bits << std::endl;
@@ -293,13 +294,13 @@ qpl_status hw_check_compress_job(qpl_job* qpl_job_ptr) {
     std::cout << "  hw_2_pass_header_gen: " << hw_2_pass_header_gen << std::endl;
     std::cout << "  multi_desc_status: " << state_ptr->multi_desc_status << std::endl;
     std::cout << "  descriptor_not_submitted: " << state_ptr->descriptor_not_submitted << std::endl;
+    END DEBUG */
 
     // Resubmit deflate task for dynamic deflate (statistics generated in first pass)
     // or 2-pass header generation (Huffman table generated in first pass).
     // or if deflate descriptor needs to be resubmitted due to QPL_STS_QUEUES_ARE_BUSY_ERR in previous submission
     if (ADCF_STATS_MODE & desc_ptr->decomp_flags || hw_2_pass_header_gen ||
         (state_ptr->multi_desc_status == qpl_stats_collect_completed && state_ptr->descriptor_not_submitted)) {
-        std::cout << "[QPL_HW_CHECK_JOB] Entering Resubmission Block..." << std::endl;
         if (state_ptr->multi_desc_status == qpl_none_completed) {
             qpl_job_ptr->crc          = comp_ptr->crc;
             qpl_job_ptr->xor_checksum = comp_ptr->xor_checksum;
@@ -409,23 +410,17 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         auto& client = *rdma_client_instance;
 
         int slot_id = state_ptr->rdma_slot_id;
-        std::cout << "[QPL_HW_CHECK_JOB] RDMA mode: slot_id=" << slot_id << std::endl;
-
         uint64_t remote_comp_addr = client.get_remote_comp_addr(slot_id);
-        std::cout << "[QPL_HW_CHECK_JOB] Reading completion from remote addr 0x" << std::hex << remote_comp_addr
-                  << std::dec << std::endl;
         if (!client.rdma_read(comp_ptr, sizeof(*comp_ptr), remote_comp_addr, client.get_remote_comp_rkey())) {
             std::cerr << "[QPL] Failed RDMA read for remote completion record." << std::endl;
             return QPL_STS_LIBRARY_INTERNAL_ERR;
         }
 
-        std::cout << "[QPL_HW_CHECK_JOB] Remote completion status: 0x" << std::hex << (int)comp_ptr->status << std::dec
-                  << std::endl;
         if (comp_ptr->status == 0) { return QPL_STS_BEING_PROCESSED; }
 
         uint32_t output_size = comp_ptr->output_size;
-        bool is_stats_pass = (ADCF_STATS_MODE & desc_ptr->decomp_flags);
-        
+        bool is_stats_pass = (qpl_job_ptr->op == qpl_op_compress) && (ADCF_STATS_MODE & desc_ptr->decomp_flags);
+
         if (output_size > 0 && qpl_job_ptr->next_out_ptr != nullptr && !is_stats_pass) {
             uint32_t copy_size = output_size;
             if (output_size > qpl_job_ptr->available_out) {
@@ -434,34 +429,14 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
                 copy_size = qpl_job_ptr->available_out;
             }
             uint64_t remote_dst_addr = client.get_remote_data_block_addr(slot_id, 2);
-            std::cout << "[QPL_HW_CHECK_JOB] Reading " << copy_size << " bytes of output from remote 0x" 
-                      << std::hex << remote_dst_addr << " to local 0x" 
-                      << (uintptr_t)qpl_job_ptr->next_out_ptr << std::dec << std::endl;
             if (!client.rdma_read(qpl_job_ptr->next_out_ptr, copy_size, remote_dst_addr,
                                   client.get_remote_data_block_rkey())) {
                 std::cerr << "[QPL] Failed RDMA read for remote output data." << std::endl;
                 return QPL_STS_LIBRARY_INTERNAL_ERR;
             }
-            std::cout << "[QPL_HW_CHECK_JOB] Output data preview (first 16 bytes): ";
-            for (uint32_t i = 0; i < 16 && i < copy_size; ++i) {
-                std::cout << std::hex << (int)qpl_job_ptr->next_out_ptr[i] << " ";
-            }
-            std::cout << std::dec << std::endl;
-        } else if (is_stats_pass) {
-            std::cout << "[QPL_HW_CHECK_JOB] Stats pass completed, keeping slot " << slot_id << " for compression phase" << std::endl;
         }
     }
     // --- END RDMA INTERCEPTION ---
-
-    // Now, comp_ptr should contain the most up-to-date completion record
-    std::cout << "[QPL_HW_CHECK_JOB] Completion Record Details:" << std::endl;
-    std::cout << "  Status: 0x" << std::hex << (int)comp_ptr->status << std::dec << std::endl;
-    std::cout << "  Error: 0x" << std::hex << (int)comp_ptr->error_code << std::dec << std::endl;
-    std::cout << "  Bytes Completed: " << comp_ptr->bytes_completed << std::endl;
-    std::cout << "  Output Size: " << comp_ptr->output_size << std::endl;
-    std::cout << "  Output Bits: " << (int)comp_ptr->output_bits << std::endl;
-    std::cout << "  CRC: 0x" << std::hex << comp_ptr->crc << std::dec << std::endl;
-    std::cout << "  XOR Checksum: 0x" << std::hex << comp_ptr->xor_checksum << std::dec << std::endl;
 
     if (!job::is_job_submitted(qpl_job_ptr)) { return QPL_STS_JOB_NOT_SUBMITTED; }
 
@@ -524,12 +499,6 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
 
             return QPL_STS_OK;
         }
-
-        std::cout << "[QPL] (Legacy) Output Data Dump (First 32 bytes):" << std::endl;
-        for (uint32_t i = 0; i < 32 && i < comp_ptr->output_size; ++i) {
-            std::cout << std::hex << (int)qpl_job_ptr->next_out_ptr[i] << (i % 8 == 7 ? "\n" : " ");
-        }
-        std::cout << std::dec << std::endl;
 
         return ml::hw_check_compress_job(qpl_job_ptr);
     }

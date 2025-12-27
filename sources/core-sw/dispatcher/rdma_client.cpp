@@ -50,14 +50,12 @@ void RdmaClient::cleanup_rdma_resources() {
     }
 
     initialized_ = false;
-    std::cout << "[RdmaClient] RDMA resources cleaned up." << std::endl;
 }
 
 bool RdmaClient::initialize(const std::string& server_ip) {
     if (initialized_) return true;
 
     server_ip_ = server_ip;
-    std::cout << "[RdmaClient] Initializing ODP connection to " << server_ip_ << std::endl;
 
     ec_ = rdma_create_event_channel();
     if (!ec_) return false;
@@ -161,22 +159,10 @@ bool RdmaClient::initialize(const std::string& server_ip) {
         return false;
     }
     if (event->param.conn.private_data_len > sizeof(rdma::ConnPrivateData)) {
-        std::cout << "[RdmaClient] Warning: Private data larger than expected. Got "
-                  << (int)event->param.conn.private_data_len << ", using first " << sizeof(rdma::ConnPrivateData)
-                  << " bytes." << std::endl;
+        // Private data larger than expected, using first bytes
     }
     remote_config_ = *reinterpret_cast<const rdma::ConnPrivateData*>(event->param.conn.private_data);
     rdma_ack_cm_event(event);
-
-    std::cout << "[RdmaClient] Connected to server. Remote config received." << std::endl;
-    std::cout << "  Portal: 0x" << std::hex << remote_config_.portal_addr << " (rkey: 0x" << remote_config_.portal_rkey
-              << ")" << std::dec << std::endl;
-    std::cout << "  Data Pool: 0x" << std::hex << remote_config_.data_pool_addr << " (rkey: 0x"
-              << remote_config_.data_pool_rkey << ")" << std::dec << " (count: " << remote_config_.data_pool_count
-              << ")" << std::endl;
-    std::cout << "  Comp Pool: 0x" << std::hex << remote_config_.comp_pool_addr << " (rkey: 0x"
-              << remote_config_.comp_pool_rkey << ")" << std::dec << " (count: " << remote_config_.comp_pool_count
-              << ")" << std::endl;
 
     // Allocate local descriptor pool (64-byte aligned)
     // No need to register MR as we use ODP (send_mr_)
@@ -192,7 +178,6 @@ bool RdmaClient::initialize(const std::string& server_ip) {
     }
 
     initialized_ = true;
-    std::cout << "[RdmaClient] RDMA ODP Connection Established." << std::endl;
     return true;
 }
 
@@ -226,7 +211,6 @@ void RdmaClient::prepare_write(const void* local_addr, size_t size, uint64_t rem
     wr->wr_id      = remote_addr;
     wr->opcode     = IBV_WR_RDMA_WRITE;
     wr->send_flags = signaled ? IBV_SEND_SIGNALED : 0;
-    // if (size <= 64) wr->send_flags |= IBV_SEND_INLINE;
 
     wr->sg_list             = sge;
     wr->num_sge             = 1;
@@ -245,8 +229,7 @@ bool RdmaClient::commit_batch() {
     if (batch_idx_ == 0) return true;
 
     struct ibv_send_wr* bad_wr = nullptr;
-    std::cout << "[RdmaClient] Committing batch of " << batch_idx_ << " WRs." << std::endl;
-    int ret = ibv_post_send(qp_, &wr_batch_[0], &bad_wr);
+    int                 ret    = ibv_post_send(qp_, &wr_batch_[0], &bad_wr);
 
     batch_idx_ = 0; // Reset
 
@@ -258,45 +241,21 @@ bool RdmaClient::commit_batch() {
 }
 
 bool RdmaClient::rdma_write(const void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey, bool signaled) {
-    // Debug dump for 64-byte writes (descriptors)
-    if (size == 64) {
-        std::cout << "[RdmaClient] Debug: RDMA Write 64 bytes to 0x" << std::hex << remote_addr << " WR ID 0x"
-                  << remote_addr << std::dec << std::endl;
-        const uint8_t* data = static_cast<const uint8_t*>(local_addr);
-        for (int i = 0; i < 64; ++i) {
-            std::cout << std::hex << (int)data[i] << (i % 8 == 7 ? "\n" : " ");
-        }
-        std::cout << std::dec << std::endl;
-    } else if (size == 1000) {
-        std::cout << "[RdmaClient] Debug: RDMA Write 1000 bytes (Src1) to 0x" << std::hex << remote_addr << " WR ID 0x"
-                  << remote_addr << std::dec << std::endl;
-        const uint8_t* data = static_cast<const uint8_t*>(local_addr);
-        for (int i = 0; i < 32; ++i) {
-            std::cout << std::hex << (int)data[i] << (i % 8 == 7 ? "\n" : " ");
-        }
-        std::cout << std::dec << std::endl;
-    } else {
-        std::cout << "[RdmaClient] Debug: RDMA Write " << size << " bytes to 0x" << std::hex << remote_addr
-                  << " WR ID 0x" << remote_addr << std::dec << std::endl;
-    }
-
     struct ibv_sge sge = {};
     sge.addr           = reinterpret_cast<uint64_t>(const_cast<void*>(local_addr));
     sge.length         = static_cast<uint32_t>(size);
     sge.lkey           = send_mr_->lkey;
 
-    struct ibv_send_wr wr = {};
-    wr.wr_id              = remote_addr;
-    wr.opcode             = IBV_WR_RDMA_WRITE;
-    wr.send_flags         = signaled ? IBV_SEND_SIGNALED : 0;
-    // if (size <= 64) { wr.send_flags |= IBV_SEND_INLINE; }
+    struct ibv_send_wr wr  = {};
+    wr.wr_id               = remote_addr;
+    wr.opcode              = IBV_WR_RDMA_WRITE;
+    wr.send_flags          = signaled ? IBV_SEND_SIGNALED : 0;
     wr.sg_list             = &sge;
     wr.num_sge             = 1;
     wr.wr.rdma.remote_addr = remote_addr;
     wr.wr.rdma.rkey        = rkey;
 
     struct ibv_send_wr* bad_wr = nullptr;
-    std::cout << "[RdmaClient] Posting WR ID 0x" << std::hex << wr.wr_id << std::dec << std::endl;
     if (ibv_post_send(qp_, &wr, &bad_wr)) return false;
 
     return true;
@@ -331,10 +290,8 @@ bool RdmaClient::rdma_read(void* local_addr, size_t size, uint64_t remote_addr, 
                           << " VendorErr: 0x" << std::hex << wc.vendor_err << std::dec << std::endl;
                 // If it's a read that failed (wr_id=1), propagate failure.
                 if (wc.wr_id == 1) return false;
-            } else if (wc.wr_id != 1) { // Found a write completion (anything not 1)
-                std::cout << "[RdmaClient] Debug: Write operation (WR ID 0x" << std::hex << wc.wr_id
-                          << ") completed successfully. Opcode: " << (int)wc.opcode << " ByteLen: " << std::dec
-                          << wc.byte_len << " VendorErr: 0x" << std::hex << wc.vendor_err << std::dec << std::endl;
+            } else if (wc.wr_id != 1) {
+                // Write completion - ignore
             }
         }
     } while (completions == 0 || wc.wr_id != 1); // Keep polling until a read completion (WR ID 1) is found

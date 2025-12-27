@@ -40,6 +40,7 @@ static const std::unordered_map<hw_accelerator_status, uint8_t> hw_status_to_pri
 
 extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specified_numa_id,
                                                        qpl::ml::util::execution_record_ext_t* record) {
+    /* DEBUG: Descriptor dump
     static int call_count = 0;
     call_count++;
     std::cout << "[QPL] hw_enqueue_descriptor called with numa_id: " << user_specified_numa_id << " (Call #"
@@ -61,8 +62,7 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
                   << std::endl;
         std::cout << "  Src2 Size: " << original_desc_content->src2_size << std::endl;
     }
-    // Assuming it's a compress descriptor if decomp_flags is 0
-    if (original_desc_content->decomp_flags == 0) { // crude check for compress descriptor, should use op_code
+    if (original_desc_content->decomp_flags == 0) {
         auto* compress_desc = reinterpret_cast<hw_compress_descriptor*>(desc_ptr);
         std::cout << "  Compression Flags: 0x" << std::hex << (int)compress_desc->compression_flags << std::dec
                   << std::endl;
@@ -72,20 +72,17 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
         std::cout << "  Decomp Flags: 0x" << std::hex << (int)original_desc_content->decomp_flags << std::dec
                   << std::endl;
     }
-
-    // Dump Src2 (AECS) if present
     if (original_desc_content->src2_ptr && original_desc_content->src2_size > 0) {
         std::cout << "  Src2 (AECS) Data Preview (First 64 bytes):" << std::endl;
         for (uint32_t i = 0; i < 64 && i < original_desc_content->src2_size; ++i) {
             std::cout << std::hex << (int)original_desc_content->src2_ptr[i] << (i % 16 == 15 ? "\n" : " ");
         }
         std::cout << std::dec << std::endl;
-        // Check if there's any non-zero data in the AECS
         bool has_nonzero = false;
         for (uint32_t i = 0; i < original_desc_content->src2_size; ++i) {
             if (original_desc_content->src2_ptr[i] != 0) {
                 has_nonzero = true;
-                std::cout << "  First non-zero byte at offset " << i << ": 0x" << std::hex 
+                std::cout << "  First non-zero byte at offset " << i << ": 0x" << std::hex
                           << (int)original_desc_content->src2_ptr[i] << std::dec << std::endl;
                 break;
             }
@@ -94,8 +91,8 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
             std::cout << "  WARNING: Src2 (AECS) is entirely zeros!" << std::endl;
         }
     }
-
     std::cout << "------------------------------------------" << std::endl;
+    END DEBUG */
 
     if (user_specified_numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID) {
         static bool                             rdma_client_initialized = false;
@@ -138,31 +135,21 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
             state_ptr->rdma_synced_src1 = nullptr;
             state_ptr->rdma_synced_src2 = nullptr;
             state_ptr->rdma_synced_dst = nullptr;
-            std::cout << "[QPL] RDMA: Allocated new slot " << slot_id << std::endl;
-        } else {
-            std::cout << "[QPL] RDMA: Reusing existing slot " << slot_id << std::endl;
         }
 
         if (desc->src1_ptr && desc->src1_size > 0) {
             if (desc->src1_ptr != state_ptr->rdma_synced_src1) {
                 uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
-                std::cout << "[QPL] RDMA: Writing Src1 (" << desc->src1_size << " bytes, addr changed)" << std::endl;
                 client.prepare_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
                 state_ptr->rdma_synced_src1 = desc->src1_ptr;
-            } else {
-                std::cout << "[QPL] RDMA: Skipping Src1 transfer (addr unchanged: 0x" << std::hex 
-                          << (uintptr_t)desc->src1_ptr << std::dec << ")" << std::endl;
             }
         }
 
         if (desc->src2_ptr && desc->src2_size > 0) {
             if (desc->src2_ptr != state_ptr->rdma_synced_src2) {
                 uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
-                std::cout << "[QPL] RDMA: Writing Src2/AECS (" << desc->src2_size << " bytes, addr changed)" << std::endl;
                 client.prepare_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
                 state_ptr->rdma_synced_src2 = desc->src2_ptr;
-            } else {
-                std::cout << "[QPL] RDMA: Skipping Src2/AECS transfer (addr unchanged, using remote state)" << std::endl;
             }
         }
 
@@ -187,13 +174,6 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
 
         static uint8_t zero_comp[64] = {0};
         client.prepare_write(zero_comp, 64, client.get_remote_comp_addr(slot_id), client.get_remote_comp_rkey(), false);
-
-        std::cout << "[QPL] Patched Remote Descriptor (Slot " << slot_id << ", reuse=" << reusing_slot << "):" << std::endl;
-        std::cout << "  Opcode: 0x" << std::hex << (int)remote_desc->op_code_op_flags << std::dec << std::endl;
-        std::cout << "  Src1: 0x" << std::hex << (uintptr_t)remote_desc->src1_ptr << " size=" << std::dec << remote_desc->src1_size << std::endl;
-        std::cout << "  Src2: 0x" << std::hex << (uintptr_t)remote_desc->src2_ptr << " size=" << std::dec << remote_desc->src2_size << std::endl;
-        std::cout << "  Dst: 0x" << std::hex << (uintptr_t)remote_desc->dst_ptr << " max=" << std::dec << remote_desc->max_dst_size << std::endl;
-
         client.prepare_write(persistent_desc_buf, 64, client.get_remote_portal_addr(), client.get_remote_portal_rkey(), true);
 
         if (!client.commit_batch()) {
@@ -205,7 +185,6 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
             return HW_ACCELERATOR_WQ_IS_BUSY;
         }
 
-        std::cout << "[QPL] RDMA Job submitted with slot: " << slot_id << std::endl;
         return HW_ACCELERATOR_STATUS_OK;
     }
     // --- END RDMA SUBMISSION LOGIC ---
