@@ -434,6 +434,13 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
                 std::cerr << "[QPL] Failed RDMA read for remote output data." << std::endl;
                 return QPL_STS_LIBRARY_INTERNAL_ERR;
             }
+        } else if (is_stats_pass && output_size > 0 && desc_ptr->dst_ptr) {
+            uint64_t remote_dst_addr = client.get_remote_data_block_addr(slot_id, 2);
+            if (!client.rdma_read(const_cast<uint8_t*>(desc_ptr->dst_ptr), output_size, remote_dst_addr,
+                                  client.get_remote_data_block_rkey())) {
+                std::cerr << "[QPL] Failed RDMA read for remote histogram after stats pass." << std::endl;
+                return QPL_STS_LIBRARY_INTERNAL_ERR;
+            }
         }
     }
     // --- END RDMA INTERCEPTION ---
