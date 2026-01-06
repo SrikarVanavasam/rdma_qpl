@@ -46,6 +46,9 @@ public:
     // Perform an RDMA Read operation
     bool rdma_read(void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey);
 
+    // Perform an RDMA Read with explicit lkey (for staging mode)
+    bool rdma_read_with_lkey(void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey, uint32_t lkey);
+
     // Get the remote address for a specific data block type and slot ID
     uint64_t get_remote_data_block_addr(int slot_id, int block_idx); // block_idx: 0=src1, 1=src2, 2=dst
     uint32_t get_remote_data_block_rkey();
@@ -58,8 +61,20 @@ public:
     uint64_t get_remote_portal_addr();
     uint32_t get_remote_portal_rkey();
 
-    // Get the local descriptor buffer for a specific slot
+    // Get the local descriptor buffer for a specific slot (ODP mode)
     uint8_t* get_local_desc_buffer(int slot_id);
+
+    // Staging buffer accessors (staging mode)
+    void* get_data_staging(int slot_id);
+    void* get_desc_staging(int slot_id);
+    void* get_comp_staging(int slot_id);
+    uint32_t get_data_staging_lkey();
+    uint32_t get_desc_staging_lkey();
+    uint32_t get_comp_staging_lkey();
+
+    // Prepare write with explicit lkey (for staging mode)
+    void prepare_write_with_lkey(const void* local_addr, size_t size, uint64_t remote_addr, 
+                                  uint32_t rkey, uint32_t lkey, bool signaled = false);
 
 private:
     RdmaClient(); // Private constructor for singleton
@@ -81,14 +96,16 @@ private:
     // Memory regions
     struct ibv_mr* send_mr_ = nullptr; // ODP MR for user data
     
-    // Local descriptor pool
+    // Local descriptor pool (ODP mode)
     void* local_desc_pool_ = nullptr;
 
-    // We'll use a single buffer for small transfers (descriptor, completion)
-    // For large data (2MB blocks), we'll need to register client's actual data
-    // or copy to a local staging buffer for RDMA. For simplicity in this
-    // prototype, we'll try to just register the user's data buffer on the fly.
-    // If that proves too slow/complex, we'll revert to a local staging buffer.
+    // Staging pools (staging mode - explicit MR, no ODP)
+    void* data_staging_pool_ = nullptr;  // NUM_JOBS * BLOCK_SIZE
+    void* desc_staging_pool_ = nullptr;  // NUM_JOBS * DESC_SIZE
+    void* comp_staging_pool_ = nullptr;  // NUM_JOBS * COMP_SIZE
+    struct ibv_mr* data_staging_mr_ = nullptr;
+    struct ibv_mr* desc_staging_mr_ = nullptr;
+    struct ibv_mr* comp_staging_mr_ = nullptr;
 
     bool initialized_ = false;
     std::string server_ip_;

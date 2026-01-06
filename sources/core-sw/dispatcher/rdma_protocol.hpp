@@ -8,10 +8,11 @@ namespace qpl::rdma {
 constexpr uint16_t SERVER_PORT = 18516;
 constexpr uint32_t BLOCK_SIZE = 2 * 1024 * 1024; // 2MB
 constexpr uint32_t COMP_SIZE = 64; // 64 Bytes
-constexpr uint32_t NUM_JOBS = 16;
+constexpr uint32_t NUM_JOBS = 128;
 constexpr uint32_t PORTAL_SIZE = 4096;
 constexpr uint32_t DESC_SIZE = 64; // Size of IAA descriptor
-constexpr int32_t QPL_RDMA_REMOTE_NUMA_ID = -100; // Special NUMA ID to indicate remote execution
+constexpr int32_t QPL_RDMA_REMOTE_NUMA_ID = -100;  // ODP mode (On-Demand Paging)
+constexpr int32_t QPL_RDMA_STAGING_NUMA_ID = -101; // Staging buffer mode (explicit MR)
 
 // We assume a fixed stride per job for simplicity in this prototype.
 // Job 'i' uses:

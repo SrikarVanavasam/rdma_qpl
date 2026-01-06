@@ -94,7 +94,8 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
     std::cout << "------------------------------------------" << std::endl;
     END DEBUG */
 
-    if (user_specified_numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID) {
+    if (user_specified_numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID || 
+        user_specified_numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID) {
         static bool                             rdma_client_initialized = false;
         static qpl::ml::dispatcher::RdmaClient* rdma_client_instance    = nullptr;
 
@@ -107,7 +108,7 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
                 }
                 rdma_client_initialized = true;
             } else {
-                std::cerr << "[QPL] QPL_RDMA_REMOTE_NUMA_ID used but QPL_RDMA_SERVER_IP not set." << std::endl;
+                std::cerr << "[QPL] RDMA NUMA ID used but QPL_RDMA_SERVER_IP not set." << std::endl;
                 return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
             }
         }
@@ -121,6 +122,9 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
         auto* comp_local = reinterpret_cast<hw_completion_record*>(desc->completion_record_ptr);
         auto* state_ptr = reinterpret_cast<qpl_hw_state*>(
             reinterpret_cast<char*>(comp_local) - offsetof(qpl_hw_state, comp_ptr));
+
+        // Determine mode: staging (explicit MR) or ODP
+        bool use_staging = (user_specified_numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID);
 
         int slot_id = state_ptr->rdma_slot_id;
         bool reusing_slot = (slot_id >= 0);
@@ -137,51 +141,89 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
             state_ptr->rdma_synced_dst = nullptr;
         }
 
-        if (desc->src1_ptr && desc->src1_size > 0) {
-            if (desc->src1_ptr != state_ptr->rdma_synced_src1) {
+        if (use_staging) {
+            // --- STAGING MODE: Copy to staging buffers, use explicit lkeys ---
+            void* data_stg = client.get_data_staging(slot_id);
+            void* desc_stg = client.get_desc_staging(slot_id);
+            void* comp_stg = client.get_comp_staging(slot_id);
+            
+            if (!data_stg || !desc_stg || !comp_stg) {
+                if (!reusing_slot) { client.release_job_slot(slot_id); state_ptr->rdma_slot_id = -1; }
+                return HW_ACCELERATOR_WQ_IS_BUSY;
+            }
+
+            // Copy source data to staging
+            if (desc->src1_ptr && desc->src1_size > 0) {
+                std::memcpy(data_stg, desc->src1_ptr, desc->src1_size);
                 uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
-                client.prepare_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
-                state_ptr->rdma_synced_src1 = desc->src1_ptr;
+                client.prepare_write_with_lkey(data_stg, desc->src1_size, remote_src1, 
+                                                client.get_remote_data_block_rkey(), 
+                                                client.get_data_staging_lkey(), false);
             }
-        }
 
-        if (desc->src2_ptr && desc->src2_size > 0) {
-            if (desc->src2_ptr != state_ptr->rdma_synced_src2) {
-                uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
-                client.prepare_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
-                state_ptr->rdma_synced_src2 = desc->src2_ptr;
+            // Copy descriptor to staging
+            std::memcpy(desc_stg, desc_ptr, 64);
+            auto* remote_desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(desc_stg);
+            if (desc->src1_ptr)
+                remote_desc->src1_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 0));
+            if (desc->src2_ptr)
+                remote_desc->src2_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 1));
+            if (desc->dst_ptr)
+                remote_desc->dst_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 2));
+            remote_desc->completion_record_ptr = reinterpret_cast<uint8_t*>(client.get_remote_comp_addr(slot_id));
+
+            // Zero out staging completion record before sending
+            std::memset(comp_stg, 0, 64);
+            client.prepare_write_with_lkey(comp_stg, 64, client.get_remote_comp_addr(slot_id),
+                                            client.get_remote_comp_rkey(),
+                                            client.get_comp_staging_lkey(), false);
+            
+            // Send descriptor to portal
+            client.prepare_write_with_lkey(desc_stg, 64, client.get_remote_portal_addr(),
+                                            client.get_remote_portal_rkey(),
+                                            client.get_desc_staging_lkey(), true);
+        } else {
+            // --- ODP MODE: Use original buffers with ODP lkey ---
+            if (desc->src1_ptr && desc->src1_size > 0) {
+                if (desc->src1_ptr != state_ptr->rdma_synced_src1) {
+                    uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
+                    client.prepare_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
+                    state_ptr->rdma_synced_src1 = desc->src1_ptr;
+                }
             }
-        }
 
-        uint8_t* persistent_desc_buf = client.get_local_desc_buffer(slot_id);
-        if (!persistent_desc_buf) {
-            if (!reusing_slot) {
-                client.release_job_slot(slot_id);
-                state_ptr->rdma_slot_id = -1;
+            if (desc->src2_ptr && desc->src2_size > 0) {
+                if (desc->src2_ptr != state_ptr->rdma_synced_src2) {
+                    uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
+                    client.prepare_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
+                    state_ptr->rdma_synced_src2 = desc->src2_ptr;
+                }
             }
-            return HW_ACCELERATOR_WQ_IS_BUSY;
+
+            uint8_t* persistent_desc_buf = client.get_local_desc_buffer(slot_id);
+            if (!persistent_desc_buf) {
+                if (!reusing_slot) { client.release_job_slot(slot_id); state_ptr->rdma_slot_id = -1; }
+                return HW_ACCELERATOR_WQ_IS_BUSY;
+            }
+            std::memcpy(persistent_desc_buf, desc_ptr, 64);
+
+            auto* remote_desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(persistent_desc_buf);
+            if (desc->src1_ptr)
+                remote_desc->src1_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 0));
+            if (desc->src2_ptr)
+                remote_desc->src2_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 1));
+            if (desc->dst_ptr)
+                remote_desc->dst_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 2));
+            remote_desc->completion_record_ptr = reinterpret_cast<uint8_t*>(client.get_remote_comp_addr(slot_id));
+
+            static uint8_t zero_comp[64] = {0};
+            client.prepare_write(zero_comp, 64, client.get_remote_comp_addr(slot_id), client.get_remote_comp_rkey(), false);
+            client.prepare_write(persistent_desc_buf, 64, client.get_remote_portal_addr(), client.get_remote_portal_rkey(), true);
         }
-        std::memcpy(persistent_desc_buf, desc_ptr, 64);
-
-        auto* remote_desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(persistent_desc_buf);
-        if (desc->src1_ptr)
-            remote_desc->src1_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 0));
-        if (desc->src2_ptr)
-            remote_desc->src2_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 1));
-        if (desc->dst_ptr)
-            remote_desc->dst_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 2));
-        remote_desc->completion_record_ptr = reinterpret_cast<uint8_t*>(client.get_remote_comp_addr(slot_id));
-
-        static uint8_t zero_comp[64] = {0};
-        client.prepare_write(zero_comp, 64, client.get_remote_comp_addr(slot_id), client.get_remote_comp_rkey(), false);
-        client.prepare_write(persistent_desc_buf, 64, client.get_remote_portal_addr(), client.get_remote_portal_rkey(), true);
 
         if (!client.commit_batch()) {
             std::cerr << "[QPL] Failed to commit RDMA batch." << std::endl;
-            if (!reusing_slot) {
-                client.release_job_slot(slot_id);
-                state_ptr->rdma_slot_id = -1;
-            }
+            if (!reusing_slot) { client.release_job_slot(slot_id); state_ptr->rdma_slot_id = -1; }
             return HW_ACCELERATOR_WQ_IS_BUSY;
         }
 

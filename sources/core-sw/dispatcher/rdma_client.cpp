@@ -28,6 +28,14 @@ void RdmaClient::cleanup_rdma_resources() {
         free(local_desc_pool_);
         local_desc_pool_ = nullptr;
     }
+    // Cleanup staging MRs
+    if (data_staging_mr_) { ibv_dereg_mr(data_staging_mr_); data_staging_mr_ = nullptr; }
+    if (desc_staging_mr_) { ibv_dereg_mr(desc_staging_mr_); desc_staging_mr_ = nullptr; }
+    if (comp_staging_mr_) { ibv_dereg_mr(comp_staging_mr_); comp_staging_mr_ = nullptr; }
+    // Cleanup staging pools
+    if (data_staging_pool_) { free(data_staging_pool_); data_staging_pool_ = nullptr; }
+    if (desc_staging_pool_) { free(desc_staging_pool_); desc_staging_pool_ = nullptr; }
+    if (comp_staging_pool_) { free(comp_staging_pool_); comp_staging_pool_ = nullptr; }
     if (qp_) {
         rdma_destroy_qp(cm_id_);
         qp_ = nullptr;
@@ -172,6 +180,56 @@ bool RdmaClient::initialize(const std::string& server_ip) {
     }
     std::memset(local_desc_pool_, 0, rdma::NUM_JOBS * rdma::DESC_SIZE);
 
+    // Allocate and register staging pools (for staging mode - explicit MR, no ODP)
+    // Data staging pool: NUM_JOBS * BLOCK_SIZE (e.g., 128 * 2MB = 256MB)
+    if (posix_memalign(&data_staging_pool_, 64, rdma::NUM_JOBS * rdma::BLOCK_SIZE)) {
+        cleanup_rdma_resources();
+        return false;
+    }
+    std::memset(data_staging_pool_, 0, rdma::NUM_JOBS * rdma::BLOCK_SIZE);
+    
+    data_staging_mr_ = ibv_reg_mr(pd_, data_staging_pool_, rdma::NUM_JOBS * rdma::BLOCK_SIZE,
+                                   IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE);
+    if (!data_staging_mr_) {
+        std::cerr << "[RdmaClient] Failed to register data staging MR: " << strerror(errno) << std::endl;
+        cleanup_rdma_resources();
+        return false;
+    }
+
+    // Descriptor staging pool: NUM_JOBS * DESC_SIZE
+    if (posix_memalign(&desc_staging_pool_, 64, rdma::NUM_JOBS * rdma::DESC_SIZE)) {
+        cleanup_rdma_resources();
+        return false;
+    }
+    std::memset(desc_staging_pool_, 0, rdma::NUM_JOBS * rdma::DESC_SIZE);
+    
+    desc_staging_mr_ = ibv_reg_mr(pd_, desc_staging_pool_, rdma::NUM_JOBS * rdma::DESC_SIZE,
+                                   IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE);
+    if (!desc_staging_mr_) {
+        std::cerr << "[RdmaClient] Failed to register desc staging MR: " << strerror(errno) << std::endl;
+        cleanup_rdma_resources();
+        return false;
+    }
+
+    // Completion staging pool: NUM_JOBS * COMP_SIZE
+    if (posix_memalign(&comp_staging_pool_, 64, rdma::NUM_JOBS * rdma::COMP_SIZE)) {
+        cleanup_rdma_resources();
+        return false;
+    }
+    std::memset(comp_staging_pool_, 0, rdma::NUM_JOBS * rdma::COMP_SIZE);
+    
+    comp_staging_mr_ = ibv_reg_mr(pd_, comp_staging_pool_, rdma::NUM_JOBS * rdma::COMP_SIZE,
+                                   IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE);
+    if (!comp_staging_mr_) {
+        std::cerr << "[RdmaClient] Failed to register comp staging MR: " << strerror(errno) << std::endl;
+        cleanup_rdma_resources();
+        return false;
+    }
+
+    std::cout << "[RdmaClient] Staging pools allocated: Data=" << (rdma::NUM_JOBS * rdma::BLOCK_SIZE / (1024*1024)) 
+              << "MB, Desc=" << (rdma::NUM_JOBS * rdma::DESC_SIZE / 1024) << "KB, Comp=" 
+              << (rdma::NUM_JOBS * rdma::COMP_SIZE / 1024) << "KB" << std::endl;
+
     std::lock_guard<std::mutex> lock(slot_mutex_);
     for (uint32_t i = 0; i < rdma::NUM_JOBS; ++i) {
         free_job_slots_.push(i);
@@ -311,6 +369,48 @@ bool RdmaClient::rdma_read(void* local_addr, size_t size, uint64_t remote_addr, 
     return true;
 }
 
+bool RdmaClient::rdma_read_with_lkey(void* local_addr, size_t size, uint64_t remote_addr, uint32_t rkey, uint32_t lkey) {
+    struct ibv_sge sge = {};
+    sge.addr           = reinterpret_cast<uint64_t>(local_addr);
+    sge.length         = static_cast<uint32_t>(size);
+    sge.lkey           = lkey;  // Explicit lkey
+
+    struct ibv_send_wr wr  = {};
+    wr.wr_id               = 1;
+    wr.opcode              = IBV_WR_RDMA_READ;
+    wr.send_flags          = IBV_SEND_SIGNALED;
+    wr.sg_list             = &sge;
+    wr.num_sge             = 1;
+    wr.wr.rdma.remote_addr = remote_addr;
+    wr.wr.rdma.rkey        = rkey;
+
+    struct ibv_send_wr* bad_wr = nullptr;
+    if (ibv_post_send(qp_, &wr, &bad_wr)) return false;
+
+    struct ibv_wc wc;
+    int           completions = 0;
+    do {
+        completions = ibv_poll_cq(cq_, 1, &wc);
+        if (completions > 0) {
+            if (wc.status != IBV_WC_SUCCESS) {
+                std::cerr << "[RdmaClient] CQ Error: " << ibv_wc_status_str(wc.status) << " for WR ID 0x" << std::hex
+                          << wc.wr_id << " Opcode: " << (int)wc.opcode << " ByteLen: " << std::dec << wc.byte_len
+                          << " VendorErr: 0x" << std::hex << wc.vendor_err << std::dec << std::endl;
+                if (wc.wr_id == 1) return false;
+            } else if (wc.wr_id != 1) {
+                // Write completion - ignore
+            }
+        }
+    } while (completions == 0 || wc.wr_id != 1);
+
+    if (completions < 0) {
+        std::cerr << "RDMA Read Failed (poll_cq error): " << strerror(errno) << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
 uint64_t RdmaClient::get_remote_data_block_addr(int slot_id, int block_idx) {
     return remote_config_.data_pool_addr + (static_cast<uint64_t>(slot_id) * 3 + block_idx) * rdma::BLOCK_SIZE;
 }
@@ -335,6 +435,55 @@ uint32_t RdmaClient::get_remote_portal_rkey() {
 uint8_t* RdmaClient::get_local_desc_buffer(int slot_id) {
     if (slot_id < 0 || static_cast<uint32_t>(slot_id) >= rdma::NUM_JOBS || !local_desc_pool_) return nullptr;
     return static_cast<uint8_t*>(local_desc_pool_) + slot_id * rdma::DESC_SIZE;
+}
+
+// Staging buffer accessors
+void* RdmaClient::get_data_staging(int slot_id) {
+    if (slot_id < 0 || static_cast<uint32_t>(slot_id) >= rdma::NUM_JOBS || !data_staging_pool_) return nullptr;
+    return static_cast<uint8_t*>(data_staging_pool_) + static_cast<size_t>(slot_id) * rdma::BLOCK_SIZE;
+}
+
+void* RdmaClient::get_desc_staging(int slot_id) {
+    if (slot_id < 0 || static_cast<uint32_t>(slot_id) >= rdma::NUM_JOBS || !desc_staging_pool_) return nullptr;
+    return static_cast<uint8_t*>(desc_staging_pool_) + slot_id * rdma::DESC_SIZE;
+}
+
+void* RdmaClient::get_comp_staging(int slot_id) {
+    if (slot_id < 0 || static_cast<uint32_t>(slot_id) >= rdma::NUM_JOBS || !comp_staging_pool_) return nullptr;
+    return static_cast<uint8_t*>(comp_staging_pool_) + slot_id * rdma::COMP_SIZE;
+}
+
+uint32_t RdmaClient::get_data_staging_lkey() { return data_staging_mr_ ? data_staging_mr_->lkey : 0; }
+uint32_t RdmaClient::get_desc_staging_lkey() { return desc_staging_mr_ ? desc_staging_mr_->lkey : 0; }
+uint32_t RdmaClient::get_comp_staging_lkey() { return comp_staging_mr_ ? comp_staging_mr_->lkey : 0; }
+
+void RdmaClient::prepare_write_with_lkey(const void* local_addr, size_t size, uint64_t remote_addr,
+                                          uint32_t rkey, uint32_t lkey, bool signaled) {
+    if (batch_idx_ >= MAX_BATCH_SIZE) {
+        std::cerr << "[RdmaClient] Batch overflow!" << std::endl;
+        return;
+    }
+
+    struct ibv_sge*     sge = &sge_batch_[batch_idx_];
+    struct ibv_send_wr* wr  = &wr_batch_[batch_idx_];
+
+    sge->addr   = reinterpret_cast<uint64_t>(const_cast<void*>(local_addr));
+    sge->length = static_cast<uint32_t>(size);
+    sge->lkey   = lkey;  // Explicit lkey
+
+    wr->wr_id      = remote_addr;
+    wr->opcode     = IBV_WR_RDMA_WRITE;
+    wr->send_flags = signaled ? IBV_SEND_SIGNALED : 0;
+
+    wr->sg_list             = sge;
+    wr->num_sge             = 1;
+    wr->wr.rdma.remote_addr = remote_addr;
+    wr->wr.rdma.rkey        = rkey;
+
+    wr->next = NULL;
+    if (batch_idx_ > 0) { wr_batch_[batch_idx_ - 1].next = wr; }
+
+    batch_idx_++;
 }
 
 } // namespace qpl::ml::dispatcher
