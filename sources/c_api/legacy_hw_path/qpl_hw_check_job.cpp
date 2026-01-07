@@ -416,17 +416,27 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         uint64_t remote_comp_addr = client.get_remote_comp_addr(slot_id);
 
         if (use_staging) {
-            // Staging mode: read into staging buffer, then copy
-            void* comp_stg = client.get_comp_staging(slot_id);
+            // Staging mode: check local staging buffer directly
+            auto* comp_stg = reinterpret_cast<hw_completion_record*>(client.get_comp_staging(slot_id));
             if (!comp_stg) {
                 std::cerr << "[QPL] Failed to get comp staging buffer." << std::endl;
                 return QPL_STS_LIBRARY_INTERNAL_ERR;
             }
-            if (!client.rdma_read_with_lkey(comp_stg, sizeof(*comp_ptr), remote_comp_addr, 
-                                             client.get_remote_comp_rkey(), client.get_comp_staging_lkey())) {
-                std::cerr << "[QPL] Failed RDMA read for remote completion record (staging)." << std::endl;
-                return QPL_STS_LIBRARY_INTERNAL_ERR;
+            
+            // Check status directly in staging
+            if (comp_stg->status == 0) {
+                // Not ready locally, sync completions up to max active slot
+                int max_slot = client.get_max_active_slot();
+                if (!client.sync_completions(max_slot + 1)) {
+                    std::cerr << "[QPL] Failed to sync completions." << std::endl;
+                    return QPL_STS_LIBRARY_INTERNAL_ERR;
+                }
+                // Still not ready after sync?
+                if (comp_stg->status == 0) {
+                    return QPL_STS_BEING_PROCESSED;
+                }
             }
+            // Copy final result to QPL's internal comp_ptr
             std::memcpy(comp_ptr, comp_stg, sizeof(*comp_ptr));
         } else {
             // ODP mode: read directly into user buffer

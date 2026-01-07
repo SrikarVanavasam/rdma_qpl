@@ -244,6 +244,8 @@ int RdmaClient::get_job_slot() {
     if (free_job_slots_.empty()) return -1;
     int slot_id = free_job_slots_.top();
     free_job_slots_.pop();
+    // Track highest active slot for efficient completion sync
+    if (slot_id > max_active_slot_) max_active_slot_ = slot_id;
     return slot_id;
 }
 
@@ -484,6 +486,26 @@ void RdmaClient::prepare_write_with_lkey(const void* local_addr, size_t size, ui
     if (batch_idx_ > 0) { wr_batch_[batch_idx_ - 1].next = wr; }
 
     batch_idx_++;
+}
+
+bool RdmaClient::sync_completions(uint32_t num_slots) {
+    if (!comp_staging_pool_ || !comp_staging_mr_) return false;
+    
+    // If num_slots is 0 or > NUM_JOBS, sync all
+    uint32_t slots_to_sync = (num_slots == 0 || num_slots > rdma::NUM_JOBS) 
+                              ? rdma::NUM_JOBS : num_slots;
+    
+    // Read completion records for first 'slots_to_sync' slots
+    uint64_t remote_comp_base = remote_config_.comp_pool_addr;
+    size_t total_size = slots_to_sync * rdma::COMP_SIZE;
+    
+    return rdma_read_with_lkey(comp_staging_pool_, total_size, remote_comp_base,
+                               remote_config_.comp_pool_rkey, comp_staging_mr_->lkey);
+}
+
+int RdmaClient::get_max_active_slot() {
+    std::lock_guard<std::mutex> lock(slot_mutex_);
+    return max_active_slot_;
 }
 
 } // namespace qpl::ml::dispatcher

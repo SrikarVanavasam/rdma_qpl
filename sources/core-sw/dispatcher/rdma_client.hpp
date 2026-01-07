@@ -72,6 +72,13 @@ public:
     uint32_t get_desc_staging_lkey();
     uint32_t get_comp_staging_lkey();
 
+    // Sync completion records from remote to local staging
+    // num_slots: number of slots to sync (0 = all NUM_JOBS)
+    bool sync_completions(uint32_t num_slots = 0);
+    
+    // Get the highest active slot index (for efficient completion sync)
+    int get_max_active_slot();
+
     // Prepare write with explicit lkey (for staging mode)
     void prepare_write_with_lkey(const void* local_addr, size_t size, uint64_t remote_addr, 
                                   uint32_t rkey, uint32_t lkey, bool signaled = false);
@@ -115,6 +122,7 @@ private:
     // Job slot management
     std::stack<int> free_job_slots_;
     std::mutex      slot_mutex_;
+    int             max_active_slot_ = -1;  // Highest slot ID currently active
     
     // Helper to cleanup RDMA resources
     void cleanup_rdma_resources();
