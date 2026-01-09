@@ -11,9 +11,11 @@
 
 #include "qpl/qpl.h"
 
-// Magic NUMA ID for Remote RDMA
-#define QPL_RDMA_REMOTE_NUMA_ID (-100)
+// Magic NUMA IDs for Remote RDMA
+#define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
+#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode
 static bool use_rdma_path = false;
+static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
 
 /**
  * @brief This example requires a command line argument to set the execution path. Valid values are `software_path`
@@ -71,9 +73,15 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
     } else if (path == "rdma_path") {
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
-        std::cout << "The test will be run on the RDMA remote path." << std::endl;
+        rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
+    } else if (path == "staging_path") {
+        *path_ptr = qpl_path_hardware;
+        use_rdma_path = true;
+        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, or rdma_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
         return 1;
     }
 
@@ -141,7 +149,7 @@ int iaa_compression(std::string src_data_file_path, std::string dest_data_file_p
             return 1;
         }
         if (use_rdma_path) {
-            job[i]->numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+            job[i]->numa_id = rdma_numa_id;
         }
     }
 

@@ -270,7 +270,8 @@ void RdmaClient::prepare_write(const void* local_addr, size_t size, uint64_t rem
 
     wr->wr_id      = remote_addr;
     wr->opcode     = IBV_WR_RDMA_WRITE;
-    wr->send_flags = signaled ? IBV_SEND_SIGNALED : 0;
+    // Use inline for small payloads (64B descriptors) - avoids HCA DMA read
+    wr->send_flags = (signaled ? IBV_SEND_SIGNALED : 0) | (size <= 64 ? IBV_SEND_INLINE : 0);
 
     wr->sg_list             = sge;
     wr->num_sge             = 1;
@@ -309,7 +310,8 @@ bool RdmaClient::rdma_write(const void* local_addr, size_t size, uint64_t remote
     struct ibv_send_wr wr  = {};
     wr.wr_id               = remote_addr;
     wr.opcode              = IBV_WR_RDMA_WRITE;
-    wr.send_flags          = signaled ? IBV_SEND_SIGNALED : 0;
+    // Use inline for small payloads (64B descriptors) - avoids HCA DMA read
+    wr.send_flags          = (signaled ? IBV_SEND_SIGNALED : 0) | (size <= 64 ? IBV_SEND_INLINE : 0);
     wr.sg_list             = &sge;
     wr.num_sge             = 1;
     wr.wr.rdma.remote_addr = remote_addr;
@@ -475,7 +477,8 @@ void RdmaClient::prepare_write_with_lkey(const void* local_addr, size_t size, ui
 
     wr->wr_id      = remote_addr;
     wr->opcode     = IBV_WR_RDMA_WRITE;
-    wr->send_flags = signaled ? IBV_SEND_SIGNALED : 0;
+    // Use inline for small payloads (64B descriptors) - avoids HCA DMA read
+    wr->send_flags = (signaled ? IBV_SEND_SIGNALED : 0) | (size <= 64 ? IBV_SEND_INLINE : 0);
 
     wr->sg_list             = sge;
     wr->num_sge             = 1;

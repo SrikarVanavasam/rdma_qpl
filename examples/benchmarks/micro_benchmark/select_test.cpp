@@ -1,4 +1,4 @@
-//* [QPL_LOW_LEVEL_SCAN_RANGE_EXAMPLE] */
+//* [QPL_LOW_LEVEL_SELECT_EXAMPLE] */
 
 #include <iostream>
 #include <fstream>
@@ -10,9 +10,11 @@
 
 #include "qpl/qpl.h"
 
-// Magic NUMA ID for Remote RDMA
-#define QPL_RDMA_REMOTE_NUMA_ID (-100)
+// Magic NUMA IDs for Remote RDMA
+#define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
+#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode
 static bool use_rdma_path = false;
+static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
 
 /**
  * @brief This example requires a command line argument to set the execution path. Valid values are `software_path`
@@ -43,9 +45,8 @@ std::size_t chunk_size = 2097152;
 // const std::size_t chunk_size = 4096;
 // const std::size_t chunk_size = 2048;
 // const std::size_t chunk_size = 1024;
-constexpr const uint32_t input_vector_width     = 8;
-constexpr const uint32_t lower_boundary         = 65; //'A'
-constexpr const uint32_t upper_boundary         = 66; //'B'
+constexpr const uint32_t input_vector_width = 8;
+constexpr const uint32_t boundary           = 71; //'G'
 
 int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_arg = 0) {
     // Get path from input argument
@@ -71,9 +72,15 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
     } else if (path == "rdma_path") {
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
-        std::cout << "The test will be run on the RDMA remote path." << std::endl;
+        rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
+    } else if (path == "staging_path") {
+        *path_ptr = qpl_path_hardware;
+        use_rdma_path = true;
+        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, or rdma_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
         return 1;
     }
 
@@ -88,14 +95,52 @@ void job_execution(qpl_job *job_ptr)
     }
 }
 
-int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_path, qpl_path_t execution_path, uint32_t &iteration, const uint32_t queue_size)
+// Simple CRC warmup to ensure RDMA connection is established
+int do_warmup_job(qpl_path_t execution_path) {
+    if (execution_path == qpl_path_software) return 0;
+    
+    std::cout << "Warmup job... " << std::flush;
+    
+    uint32_t job_size = 0;
+    qpl_status status = qpl_get_job_size(execution_path, &job_size);
+    if (status != QPL_STS_OK) return status;
+    
+    std::vector<uint8_t> job_buffer(job_size);
+    qpl_job* job = reinterpret_cast<qpl_job*>(job_buffer.data());
+    status = qpl_init_job(execution_path, job);
+    if (status != QPL_STS_OK) return status;
+    
+    if (use_rdma_path) {
+        job->numa_id = rdma_numa_id;
+    }
+    
+    std::vector<uint8_t> warmup_data(1024, 0xAA);
+    job->op           = qpl_op_crc64;
+    job->next_in_ptr  = warmup_data.data();
+    job->available_in = static_cast<uint32_t>(warmup_data.size());
+    job->crc64_poly   = 0x42F0E1EBA9EA3693ULL;
+    
+    status = qpl_execute_job(job);
+    qpl_fini_job(job);
+    
+    if (status != QPL_STS_OK) {
+        std::cout << "Failed (" << status << ")" << std::endl;
+        return status;
+    }
+    std::cout << "Done" << std::endl;
+    return 0;
+}
+
+int iaa_select(std::string src_data_file_path, std::string dest_data_file_path, qpl_path_t execution_path, uint32_t &iteration, const uint32_t queue_size)
 {
     // Source and output containers
     std::vector<uint8_t> whole_src_vector;
     // std::vector<std::vector<uint8_t>> src_vector;
+    std::vector<std::vector<uint8_t>> mask_after_scan;
     std::vector<std::vector<uint8_t>> dest_vector;
+    double elapsed_time_sec = 0;
 
-    std::cout << "[IAA Scan Range]" << std::endl;
+    std::cout << "[IAA Select]" << std::endl;
     
     // Opening source file
     std::cout << "Source file = " << src_data_file_path << std::endl;
@@ -121,6 +166,7 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
 
     // Allocation
     // src_vector.resize(queue_size);
+    mask_after_scan.resize(queue_size);
     dest_vector.resize(queue_size);
     job_buffer.resize(queue_size);
     job.resize(queue_size);
@@ -140,7 +186,7 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
             return 1;
         }
         if (use_rdma_path) {
-            job[i]->numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+            job[i]->numa_id = rdma_numa_id;
         }
     }
 
@@ -157,10 +203,12 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
     // Closing source file
     src_file.close();
     std::size_t current_idx = 0;
+
     std::chrono::duration<int64_t, std::nano> whole_elapsed_time_ns = std::chrono::nanoseconds::zero();
+
     auto whole_start = std::chrono::steady_clock::now();
 
-    // Scan_range
+    // Scan & Select
     while(src_file_left > 0) {
         int enqueue_cnt = 0;
         for (int i = 0; i < queue_size; ++i) {
@@ -171,37 +219,49 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
                 vector_size = chunk_size;
             }
             // src_vector[i].resize(vector_size);
-            /**
-             * NOTE : The destination vector size must be 4 times that of the source vector size because IAA exports 4 Bytes of index data
-             * for every 1 Byte of source data. However if the output data count is not exceeded over 1/4 of data chunk for every data chunk,
-             * IAA will not produce an error. Therefore, for convenience, the destination vector size is set to the same size as the source vector size.
-             * The reason what it does like this is that maximum size of the destination buffer also has 2MB limitation. If you want to use 2MB source
-             * buffer, you have to set the detination buffer size to 8MB but it is not possible.
-            */
+            mask_after_scan[i].resize(vector_size);
             dest_vector[i].resize(vector_size);
             // Loading data from source file to source vector
             // src_file.read(reinterpret_cast<char *>(&src_vector[i].front()), vector_size);
 
-            // Performing a operation
-            job[i]->op                 = qpl_op_scan_range;
+            // Performing a scan operation
+            job[i]->op                 = qpl_op_scan_eq;
             job[i]->level              = qpl_default_level;
-            job[i]->next_in_ptr        = whole_src_vector.data() + current_idx;
+            job[i]->next_in_ptr        = (uint8_t*)whole_src_vector.data() + current_idx;
+            job[i]->next_out_ptr       = mask_after_scan[i].data();
+            job[i]->available_in       = static_cast<uint32_t>(vector_size);
+            job[i]->available_out      = static_cast<uint32_t>(vector_size);
+            job[i]->src1_bit_width     = input_vector_width;
+            job[i]->num_input_elements = static_cast<uint32_t>(vector_size);
+            job[i]->out_bit_width      = qpl_ow_nom;
+            job[i]->param_low          = boundary;
+
+            status = qpl_execute_job(job[i]);
+            if (status != QPL_STS_OK) {
+                std::cout << "In Scan execute, An error " << status << " acquired during job execution." << std::endl;
+                return 1;
+            }
+            const auto mask_length = job[i]->total_out;
+
+            // Performing a select operation
+            job[i]->op                 = qpl_op_select;
+            job[i]->level              = qpl_default_level;
+            job[i]->next_in_ptr        = (uint8_t*)whole_src_vector.data() + current_idx;
             job[i]->next_out_ptr       = dest_vector[i].data();
             job[i]->available_in       = static_cast<uint32_t>(vector_size);
             job[i]->available_out      = static_cast<uint32_t>(vector_size);
             job[i]->src1_bit_width     = input_vector_width;
             job[i]->num_input_elements = static_cast<uint32_t>(vector_size);
-            job[i]->out_bit_width      = qpl_ow_32;
-            job[i]->param_low          = lower_boundary;
-            job[i]->param_high         = upper_boundary;
-
-            current_idx += vector_size;
+            job[i]->out_bit_width      = qpl_ow_nom;
+            job[i]->next_src2_ptr      = mask_after_scan[i].data();
+            job[i]->available_src2     = mask_length;
+            job[i]->src2_bit_width     = 1;
 
             src_file_left -= vector_size;
             enqueue_cnt = i + 1;
             if (src_file_left == 0) { break; }
+            current_idx += vector_size;
         }
-
         // Submit & Waiting
         if(execution_path == qpl_path_software) {
             std::vector<std::thread *> job_th;
@@ -222,7 +282,11 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
                 }
             }
             for (int i = 0; i < enqueue_cnt; ++i) {
+                if (qpl_check_job(job[i]) == QPL_STS_OK) {
+                    continue;
+                }
                 status = qpl_wait_job(job[i]);
+                // std::cout << "Select: " << i << "status: " << qpl_check_job(job[i]) << std::endl;
                 if (status != QPL_STS_OK) {
                     std::cout << "An error " << status << " acquired during job waiting." << std::endl;
                     return 1;
@@ -232,25 +296,21 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
             elapsed_time_ns += end - start;
         }
 
-        for (int i = 0; i < enqueue_cnt; ++i) {
-            // Opening destination file
-            std::ofstream dest_file;
-            // dest_file.open(dest_data_file_path + "." + std::to_string(iteration + i), std::ofstream::out | std::ofstream::binary);
-            // if (!dest_file) {
-            //     std::cout << "File not found : " << dest_data_file_path << std::endl;
-            //     return 1;
-            // }
+        // for (int i = 0; i < enqueue_cnt; ++i) {
+        //     // Opening destination file
+        //     std::ofstream dest_file;
+        //     dest_file.open(dest_data_file_path + "." + std::to_string(iteration + i), std::ofstream::out | std::ofstream::binary);
+        //     if (!dest_file) {
+        //         std::cout << "File not found : " << dest_data_file_path << std::endl;
+        //         return 1;
+        //     }
 
-            // Writing scanned data to destination file
-            // const auto *indices = reinterpret_cast<const uint32_t *>(dest_vector[i].data());
-            // const auto indices_byte_size = job[i]->total_out;
-            // for(uint32_t index = 0; index < (indices_byte_size / 4); ++index) {
-            //     dest_file << src_vector[i][indices[index]];
-            // }
+        //     // Writing selected data to destination file
+        //     dest_file.write(reinterpret_cast<char *>(&dest_vector[i].front()), static_cast<std::size_t>(job[i]->total_out));
 
-            // Closing destination file
-            dest_file.close();
-        }
+        //     // Closing destination file
+        //     dest_file.close();
+        // }
 
         iteration += enqueue_cnt;
 
@@ -274,12 +334,12 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
     }
 
     std::cout << std::endl;
-    std::cout << "Scan range was performed successfully." << std::endl;
+    std::cout << "Select was performed successfully." << std::endl;
     std::cout << "Input size      = " << src_file_size << " Bytes" << std::endl;
-    double elapsed_time_sec = static_cast<double>(elapsed_time_ns.count()) / 1000 / 1000 / 1000;
-    // std::cout << "Elapsed Time = " << elapsed_time_ns.count() << " ns (" << elapsed_time_sec << " s)" << std::endl;
-    // double whole_elapsed_time_sec = static_cast<double>(whole_elapsed_time_ns.count()) / 1000 / 1000 / 1000;
-    // std::cout << "Whole elapsed Time = " << whole_elapsed_time_ns.count() << " ns (" << whole_elapsed_time_sec << " s)" << std::endl;
+    elapsed_time_sec = static_cast<double>(elapsed_time_ns.count()) / 1000 / 1000 / 1000;
+    std::cout << "Elapsed Time = " << elapsed_time_ns.count() << " ns (" << elapsed_time_sec << " s)" << std::endl;
+    double whole_elapsed_time_sec = static_cast<double>(whole_elapsed_time_ns.count()) / 1000 / 1000 / 1000;
+    std::cout << "Whole elapsed Time = " << whole_elapsed_time_ns.count() << " ns (" << whole_elapsed_time_sec << " s)" << std::endl;
     std::cout << "Bandwidth       = " << static_cast<double>(src_file_size) / 1024 / 1024 / elapsed_time_sec << " MB/s" << std::endl;
 
     return 0;
@@ -300,7 +360,7 @@ auto main(int argc, char** argv) -> int {
 
     // File path
     const std::string SRC_DATA_FILE_PATH    = argv[2];
-    const std::string DEST_DATA_FILE_PATH   = SRC_DATA_FILE_PATH + ".iaa.scanned_range";
+    const std::string DEST_DATA_FILE_PATH   = SRC_DATA_FILE_PATH + ".iaa.selected";
     
     const uint32_t queue_size = static_cast<uint32_t>(atoi(argv[3]));
     uint32_t iteration = 0;
@@ -308,13 +368,20 @@ auto main(int argc, char** argv) -> int {
     std::cout << "Queue Size = " << queue_size << std::endl;
     std::cout << std::endl;
     chunk_size = static_cast<size_t>(atoi(argv[4]));
-    // Scan
-    if(iaa_scan_range(SRC_DATA_FILE_PATH, DEST_DATA_FILE_PATH, execution_path, iteration, queue_size) != 0) {
-        std::cout << "An error acquired during iaa_execution(scan_range)" << std::endl;
+    
+    // Warmup to establish RDMA connection before timing
+    if (do_warmup_job(execution_path) != 0) {
+        std::cout << "Warmup failed!" << std::endl;
+        return 1;
+    }
+    
+    // Select
+    if(iaa_select(SRC_DATA_FILE_PATH, DEST_DATA_FILE_PATH, execution_path, iteration, queue_size) != 0) {
+        std::cout << "An error acquired during iaa_execution(select)" << std::endl;
         return 1;
     }
 
     return 0;
 }
 
-//* [QPL_LOW_LEVEL_SCAN_RANGE_EXAMPLE] */
+//* [QPL_LOW_LEVEL_SELECT_EXAMPLE] */

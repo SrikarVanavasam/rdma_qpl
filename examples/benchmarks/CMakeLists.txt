@@ -10,7 +10,7 @@ find_path(LZ4_INCLUDE_DIR lz4.h)
 find_library(LZ4_LIBRARY lz4)
 
 # Microbenchmarks
-file(GLOB_RECURSE MICROBENCH_SOURCES "micro_benchmark/*.cpp")
+file(GLOB MICROBENCH_SOURCES "micro_benchmark/*.cpp")
 
 foreach(source_file ${MICROBENCH_SOURCES})
     get_filename_component(example_name ${source_file} NAME_WE)

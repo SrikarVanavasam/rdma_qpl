@@ -19,9 +19,21 @@ cmake ..
 make -j
 ```
 
-## Running Benchmarks
+### Running Benchmarks Automatically
 
-### Microbenchmarks
+Use the provided Python script to run the full benchmark suite comparing Software, Hardware, and Staging (RDMA) paths.
+
+```bash
+python3 examples/benchmarks/run_experiments.py
+```
+
+This script will:
+- Discover built benchmarks in `build/examples/benchmarks`.
+- Run experiments on `software_path` (CPU), `hardware_path` (Local accelerator), and `staging_path` (Remote RDMA accelerator).
+- Automatically use 8 engines and a 2MB chunk size.
+- Skip software execution for pipelined benchmarks where CPU comparison is not relevant.
+
+### Manual Execution
 
 The microbenchmarks are compiled into executables prefixed with `mb_`. For example:
 

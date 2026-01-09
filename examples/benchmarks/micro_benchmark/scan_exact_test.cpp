@@ -10,9 +10,11 @@
 
 #include "qpl/qpl.h"
 
-// Magic NUMA ID for Remote RDMA
-#define QPL_RDMA_REMOTE_NUMA_ID (-100)
+// Magic NUMA IDs for Remote RDMA
+#define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
+#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode
 static bool use_rdma_path = false;
+static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
 
 /**
  * @brief This example requires a command line argument to set the execution path. Valid values are `software_path`
@@ -70,9 +72,15 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
     } else if (path == "rdma_path") {
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
-        std::cout << "The test will be run on the RDMA remote path." << std::endl;
+        rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
+    } else if (path == "staging_path") {
+        *path_ptr = qpl_path_hardware;
+        use_rdma_path = true;
+        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, or rdma_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
         return 1;
     }
 
@@ -85,6 +93,42 @@ void job_execution(qpl_job *job_ptr)
     if (status != QPL_STS_OK) {
         std::cout << "An error " << status << " acquired during job execution." << std::endl;
     }
+}
+
+// Simple CRC warmup to ensure RDMA connection is established
+int do_warmup_job(qpl_path_t execution_path) {
+    if (execution_path == qpl_path_software) return 0;
+    
+    std::cout << "Warmup job... " << std::flush;
+    
+    uint32_t job_size = 0;
+    qpl_status status = qpl_get_job_size(execution_path, &job_size);
+    if (status != QPL_STS_OK) return status;
+    
+    std::vector<uint8_t> job_buffer(job_size);
+    qpl_job* job = reinterpret_cast<qpl_job*>(job_buffer.data());
+    status = qpl_init_job(execution_path, job);
+    if (status != QPL_STS_OK) return status;
+    
+    if (use_rdma_path) {
+        job->numa_id = rdma_numa_id;
+    }
+    
+    std::vector<uint8_t> warmup_data(1024, 0xAA);
+    job->op           = qpl_op_crc64;
+    job->next_in_ptr  = warmup_data.data();
+    job->available_in = static_cast<uint32_t>(warmup_data.size());
+    job->crc64_poly   = 0x42F0E1EBA9EA3693ULL;
+    
+    status = qpl_execute_job(job);
+    qpl_fini_job(job);
+    
+    if (status != QPL_STS_OK) {
+        std::cout << "Failed (" << status << ")" << std::endl;
+        return status;
+    }
+    std::cout << "Done" << std::endl;
+    return 0;
 }
 
 int iaa_scan(std::string src_data_file_path, std::string dest_data_file_path, qpl_path_t execution_path, uint32_t &iteration, const uint32_t queue_size)
@@ -138,7 +182,7 @@ int iaa_scan(std::string src_data_file_path, std::string dest_data_file_path, qp
             return 1;
         }
         if (use_rdma_path) {
-            job[i]->numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+            job[i]->numa_id = rdma_numa_id;
         }
     }
 
@@ -157,6 +201,7 @@ int iaa_scan(std::string src_data_file_path, std::string dest_data_file_path, qp
     std::size_t current_idx = 0;
 
     std::chrono::duration<int64_t, std::nano> whole_elapsed_time_ns = std::chrono::nanoseconds::zero();
+
     auto whole_start = std::chrono::steady_clock::now();
 
     // Scan
@@ -311,6 +356,13 @@ auto main(int argc, char** argv) -> int {
     std::cout << "Queue Size = " << queue_size << std::endl;
     std::cout << std::endl;
     chunk_size = static_cast<size_t>(atoi(argv[4]));
+    
+    // Warmup to establish RDMA connection before timing
+    if (do_warmup_job(execution_path) != 0) {
+        std::cout << "Warmup failed!" << std::endl;
+        return 1;
+    }
+    
     // Scan
     if(iaa_scan(SRC_DATA_FILE_PATH, DEST_DATA_FILE_PATH, execution_path, iteration, queue_size) != 0) {
         std::cout << "An error acquired during iaa_execution(scan)" << std::endl;

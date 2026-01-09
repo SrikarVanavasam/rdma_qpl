@@ -1,4 +1,4 @@
-//* [QPL_LOW_LEVEL_Expand_EXAMPLE] */
+//* [QPL_LOW_LEVEL_CRC64_EXAMPLE] */
 
 #include <iostream>
 #include <fstream>
@@ -7,13 +7,14 @@
 #include <string>
 #include <chrono>
 #include <thread>
-#include <cmath>
 
 #include "qpl/qpl.h"
 
-// Magic NUMA ID for Remote RDMA
-#define QPL_RDMA_REMOTE_NUMA_ID (-100)
+// Magic NUMA IDs for Remote RDMA
+#define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
+#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode 
 static bool use_rdma_path = false;
+static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
 
 /**
  * @brief This example requires a command line argument to set the execution path. Valid values are `software_path`
@@ -44,10 +45,7 @@ std::size_t chunk_size = 2097152;
 // const std::size_t chunk_size = 4096;
 // const std::size_t chunk_size = 2048;
 // const std::size_t chunk_size = 1024;
-constexpr const uint32_t input_vector_width = 8;
-constexpr const uint32_t output_vector_width = 1;
-uint32_t mask_size           = 2*1024*1024;
-uint32_t mask_byte_length = mask_size / 8;
+constexpr const uint64_t poly = 0x04C11DB700000000;
 
 int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_arg = 0) {
     // Get path from input argument
@@ -73,9 +71,15 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
     } else if (path == "rdma_path") {
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
-        std::cout << "The test will be run on the RDMA remote path." << std::endl;
+        rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
+    } else if (path == "staging_path") {
+        *path_ptr = qpl_path_hardware;
+        use_rdma_path = true;
+        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, or rdma_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
         return 1;
     }
 
@@ -90,15 +94,14 @@ void job_execution(qpl_job *job_ptr)
     }
 }
 
-int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, qpl_path_t execution_path, uint32_t &iteration, const uint32_t queue_size)
+int iaa_crc64(std::string src_data_file_path, std::string dest_data_file_path, qpl_path_t execution_path, const uint32_t queue_size)
 {
     // Source and output containers
+    std::vector<uint8_t> whole_src_vector;
     std::vector<std::vector<uint8_t>> src_vector;
-    std::vector<std::vector<uint8_t>> dest_vector;
-    std::vector<std::vector<uint8_t>> mask_vector;
     double elapsed_time_sec = 0;
 
-    std::cout << "[IAA Expand]" << std::endl;
+    std::cout << "[IAA CRC64]" << std::endl;
     
     // Opening source file
     std::cout << "Source file = " << src_data_file_path << std::endl;
@@ -124,8 +127,6 @@ int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, 
 
     // Allocation
     src_vector.resize(queue_size);
-    dest_vector.resize(queue_size);
-    mask_vector.resize(queue_size);
     job_buffer.resize(queue_size);
     job.resize(queue_size);
 
@@ -144,132 +145,150 @@ int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, 
             return 1;
         }
         if (use_rdma_path) {
-            job[i]->numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+            job[i]->numa_id = rdma_numa_id;
         }
     }
 
     std::chrono::duration<int64_t, std::nano> elapsed_time_ns = std::chrono::nanoseconds::zero();
     std::size_t src_file_left = src_file_size;
     std::size_t vector_size = 0;
-    iteration = 0;
 
+    whole_src_vector.resize(src_file_size);
+    // Load memory 
+    src_file.read(reinterpret_cast<char *>(&whole_src_vector.front()), src_file_size);
     // Closing source file
     src_file.close();
+    
+    // Force all pages to be faulted in before RDMA operations
+    // This ensures the file data is actually in physical memory
+    if (use_rdma_path) {
+        std::cout << "Prefaulting all pages..." << std::flush;
+        volatile uint8_t sum = 0;
+        const size_t page_size = 4096;
+        for (size_t i = 0; i < src_file_size; i += page_size) {
+            sum += whole_src_vector[i];  // Touch each page
+        }
+        // Touch the last byte too
+        if (src_file_size > 0) {
+            sum += whole_src_vector[src_file_size - 1];
+        }
+        (void)sum;  // Prevent compiler from optimizing away
+        std::cout << " Done" << std::endl;
+    }
+    
+    // Warmup: Execute one job before timing to ensure RDMA connection is established
+    std::cout << "Warmup job... " << std::flush;
+    job[0]->op           = qpl_op_crc64;
+    job[0]->next_in_ptr  = whole_src_vector.data();
+    job[0]->available_in = std::min(static_cast<std::size_t>(chunk_size), src_file_size);
+    job[0]->crc64_poly   = poly;
+    qpl_status warmup_status = qpl_execute_job(job[0]);
+    if (warmup_status != QPL_STS_OK) {
+        std::cout << "Warmup failed: " << warmup_status << std::endl;
+        return 1;
+    }
+    std::cout << "Done (CRC=" << job[0]->crc64 << ")" << std::endl;
+
     std::size_t current_idx = 0;
 
     std::chrono::duration<int64_t, std::nano> whole_elapsed_time_ns = std::chrono::nanoseconds::zero();
     auto whole_start = std::chrono::steady_clock::now();
 
-    int expanded_size = 0;
-    // Expand
-    while(src_file_left > 0) {
-        int enqueue_cnt = 0;
-        for (int i = 0; i < queue_size; ++i) {
-            // Resizing source and destination vectors
-            if (src_file_left <= chunk_size / 2) {
+    // CRC64
+    // Pipelining Strategy:
+    // 1. Fill pipeline: Submit 'queue_size' jobs
+    // 2. Steady state: Wait for oldest job, submit new job
+    // 3. Drain pipeline: Wait for remaining jobs
+
+    // Circular buffer index for jobs
+    int job_idx = 0; 
+    int jobs_in_flight = 0;
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    // Loop until all source data is processed
+    while (src_file_left > 0 || jobs_in_flight > 0) {
+        
+        // --- SUBMIT PHASE ---
+        // Submit jobs while we have data and pipeline capacity
+        while (src_file_left > 0 && jobs_in_flight < queue_size) {
+            // Calculate chunk size
+            if (src_file_left <= chunk_size) {
                 vector_size = src_file_left;
             } else {
-                vector_size = chunk_size / 2;
+                vector_size = chunk_size;
             }
-            mask_vector[i].resize(mask_byte_length, 0);
-            int full_bytes = vector_size / 8;
-            int remaining_bits = vector_size % 8;
 
-            if (remaining_bits > 0) {
-                mask_vector[i][full_bytes] = (0xFF << (8 - remaining_bits));
-            }
-            src_vector[i].resize(vector_size);
-            dest_vector[i].resize(mask_size);
+            // Setup job
+            job[job_idx]->op           = qpl_op_crc64;
+            job[job_idx]->next_in_ptr  = whole_src_vector.data() + current_idx;
+            job[job_idx]->available_in = static_cast<uint32_t>(vector_size);
+            job[job_idx]->crc64_poly   = poly;
 
-            // Loading data from source file to source vector
-            src_file.read(reinterpret_cast<char *>(&src_vector[i].front()), vector_size);
-            // Performing a operation
-            job[i]->op                 = qpl_op_expand;
-            job[i]->next_in_ptr        = src_vector[i].data();
-            job[i]->next_out_ptr       = dest_vector[i].data();
-            job[i]->available_in       = static_cast<uint32_t>(vector_size);
-            job[i]->available_out      = static_cast<uint32_t>(mask_size);
-            job[i]->src1_bit_width     = input_vector_width;
-            job[i]->src2_bit_width     = output_vector_width;
-            job[i]->available_src2     = mask_byte_length/2;
-            job[i]->num_input_elements = mask_size/2;
-            job[i]->out_bit_width      = qpl_ow_8;
-            job[i]->next_src2_ptr      = mask_vector[i].data();
-            
-
-            current_idx += vector_size;
-
+            current_idx   += vector_size;
             src_file_left -= vector_size;
-            enqueue_cnt = i + 1;
-            if (src_file_left == 0) { break; }
-        }
 
-        // Submit & Waiting
-        if(execution_path == qpl_path_software) {
-            std::vector<std::thread *> job_th;
-            job_th.resize(enqueue_cnt);
-            auto start = std::chrono::steady_clock::now();
-            for (int i = 0; i < enqueue_cnt; ++i) { job_th[i] = new std::thread(job_execution, job[i]); }
-            for (int i = 0; i < enqueue_cnt; ++i) { job_th[i]->join(); }
-            auto end = std::chrono::steady_clock::now();
-            elapsed_time_ns += end - start;
-            for (int i = 0; i < enqueue_cnt; ++i) { delete job_th[i]; }
-        } else {
-            auto start = std::chrono::steady_clock::now();
-            for (int i = 0; i < enqueue_cnt; ++i) {
-                status = qpl_submit_job(job[i]);
+            if (execution_path == qpl_path_software) {
+                qpl_execute_job(job[job_idx]); // Sync execute for SW path
+            } else {
+                status = qpl_submit_job(job[job_idx]);
                 if (status != QPL_STS_OK) {
                     std::cout << "An error " << status << " acquired during job execution." << std::endl;
                     return 1;
                 }
+                jobs_in_flight++;
+                // Move to next slot in circular buffer
+                job_idx = (job_idx + 1) % queue_size;
             }
-            for (int i = 0; i < enqueue_cnt; ++i) {
-                if (qpl_check_job(job[i]) == QPL_STS_OK) {
-                    // std::cout << i << "th is already done" << std::endl;
-                    continue;
-                }
-                status = qpl_wait_job(job[i]);
+        }
+
+        // --- WAIT PHASE ---
+        // Check for completions if pipeline is full or no more data to submit
+        if (jobs_in_flight > 0 && (jobs_in_flight == queue_size || src_file_left == 0)) {
+            // In the circular buffer, the "oldest" job is always at job_idx
+            // because we incremented job_idx after submitting.
+            // Wait for the oldest job to free up its slot
+            
+            if (execution_path != qpl_path_software) {
+                status = qpl_wait_job(job[job_idx]);
                 if (status != QPL_STS_OK) {
                     std::cout << "An error " << status << " acquired during job waiting." << std::endl;
                     return 1;
                 }
+                jobs_in_flight--;
+                // Slot at job_idx is now free for next iteration's submit
             }
-            auto end = std::chrono::steady_clock::now();
-            elapsed_time_ns += end - start;
         }
+    }
 
-        for (int i = 0; i < enqueue_cnt; ++i) {
-            expanded_size += job[i]->total_out;
+    auto end_time = std::chrono::steady_clock::now();
+    elapsed_time_ns += end_time - start_time;
+
+        // for (int i = 0; i < enqueue_cnt; ++i) {
         //     // Opening destination file
         //     std::ofstream dest_file;
         //     dest_file.open(dest_data_file_path + "." + std::to_string(iteration + i), std::ofstream::out | std::ofstream::binary);
         //     if (!dest_file) {
         //         std::cout << "File not found : " << dest_data_file_path << std::endl;
         //         return 1;
-            }
-
-        //     // Writing expanded data to destination file
-        //     const auto *indices = reinterpret_cast<const uint32_t *>(dest_vector[i].data());
-        //     const auto indices_byte_size = job[i]->total_out;
-        //     for(uint32_t index = 0; index < (indices_byte_size / 4); ++index) {
-        //         dest_file << src_vector[i][indices[index]];
         //     }
+
+        //     // Writing CRC64 data to destination file
+        //     const std::string crc_value_str = std::to_string(job[i]->crc64);
+        //     dest_file.write(crc_value_str.c_str(), sizeof(uint64_t));
 
         //     // Closing destination file
         //     dest_file.close();
         // }
 
-        iteration += enqueue_cnt;
 
         std::cout << '\r';
         std::cout << "Progress ... " << (src_file_size - src_file_left) << " / " << src_file_size << " Bytes" << std::flush;
-    }
-    // std::cout << "Expanded size: " << expanded_size << std::endl;
-    // std::cout << "input: " << src_file_size << std::endl;
-    // std::cout << "input / (1MB) = " << (static_cast<float> (src_file_size) )/ 1024 / 1024 << std::endl;
-    // std::cout << "expected: " << std::ceil((static_cast<float> (src_file_size) )/ 1024 / 1024 ) * 2 * 1024 * 1024 << std::endl;
+
+
     // Closing source file
     // src_file.close();
+
     auto whole_end = std::chrono::steady_clock::now();
 
     whole_elapsed_time_ns += whole_end - whole_start;
@@ -284,7 +303,7 @@ int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, 
     }
 
     std::cout << std::endl;
-    std::cout << "Expand was performed successfully." << std::endl;
+    std::cout << "CRC64 was performed successfully." << std::endl;
     std::cout << "Input size      = " << src_file_size << " Bytes" << std::endl;
     elapsed_time_sec = static_cast<double>(elapsed_time_ns.count()) / 1000 / 1000 / 1000;
     // std::cout << "Elapsed Time = " << elapsed_time_ns.count() << " ns (" << elapsed_time_sec << " s)" << std::endl;
@@ -310,22 +329,20 @@ auto main(int argc, char** argv) -> int {
 
     // File path
     const std::string SRC_DATA_FILE_PATH    = argv[2];
-    const std::string DEST_DATA_FILE_PATH   = SRC_DATA_FILE_PATH + ".iaa.expanded";
-    
+    const std::string DEST_DATA_FILE_PATH   = SRC_DATA_FILE_PATH + ".iaa.crc64";
+
     const uint32_t queue_size = static_cast<uint32_t>(atoi(argv[3]));
-    uint32_t iteration = 0;
+    chunk_size = static_cast<size_t>(atoi(argv[4]));
 
     std::cout << "Queue Size = " << queue_size << std::endl;
     std::cout << std::endl;
-    // Expand
-    chunk_size = static_cast<size_t>(atoi(argv[4]));
-    mask_size = chunk_size;
-    if(iaa_expand(SRC_DATA_FILE_PATH, DEST_DATA_FILE_PATH, execution_path, iteration, queue_size) != 0) {
-        std::cout << "An error acquired during iaa_execution(Expand)" << std::endl;
+    // CRC64
+    if(iaa_crc64(SRC_DATA_FILE_PATH, DEST_DATA_FILE_PATH, execution_path, queue_size) != 0) {
+        std::cout << "An error acquired during iaa_execution(crc64)" << std::endl;
         return 1;
     }
 
     return 0;
 }
 
-//* [QPL_LOW_LEVEL_Expand_EXAMPLE] */
+//* [QPL_LOW_LEVEL_CRC64_EXAMPLE] */

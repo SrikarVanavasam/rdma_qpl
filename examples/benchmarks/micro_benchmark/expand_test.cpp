@@ -1,4 +1,4 @@
-//* [QPL_LOW_LEVEL_EXTRACT_EXAMPLE] */
+//* [QPL_LOW_LEVEL_Expand_EXAMPLE] */
 
 #include <iostream>
 #include <fstream>
@@ -7,12 +7,15 @@
 #include <string>
 #include <chrono>
 #include <thread>
+#include <cmath>
 
 #include "qpl/qpl.h"
 
-// Magic NUMA ID for Remote RDMA
-#define QPL_RDMA_REMOTE_NUMA_ID (-100)
+// Magic NUMA IDs for Remote RDMA
+#define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
+#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode
 static bool use_rdma_path = false;
+static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
 
 /**
  * @brief This example requires a command line argument to set the execution path. Valid values are `software_path`
@@ -44,8 +47,9 @@ std::size_t chunk_size = 2097152;
 // const std::size_t chunk_size = 2048;
 // const std::size_t chunk_size = 1024;
 constexpr const uint32_t input_vector_width = 8;
-int32_t lower_index        = 0;
-int32_t upper_index        = chunk_size - 1;
+constexpr const uint32_t output_vector_width = 1;
+uint32_t mask_size           = 2*1024*1024;
+uint32_t mask_byte_length = mask_size / 8;
 
 int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_arg = 0) {
     // Get path from input argument
@@ -71,9 +75,15 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
     } else if (path == "rdma_path") {
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
-        std::cout << "The test will be run on the RDMA remote path." << std::endl;
+        rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
+    } else if (path == "staging_path") {
+        *path_ptr = qpl_path_hardware;
+        use_rdma_path = true;
+        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
+        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, or rdma_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
         return 1;
     }
 
@@ -88,15 +98,51 @@ void job_execution(qpl_job *job_ptr)
     }
 }
 
-int iaa_extract(std::string src_data_file_path, std::string dest_data_file_path, qpl_path_t execution_path, uint32_t &iteration, const uint32_t queue_size)
+// Simple CRC warmup to ensure RDMA connection is established
+int do_warmup_job(qpl_path_t execution_path) {
+    if (execution_path == qpl_path_software) return 0;
+    
+    std::cout << "Warmup job... " << std::flush;
+    
+    uint32_t job_size = 0;
+    qpl_status status = qpl_get_job_size(execution_path, &job_size);
+    if (status != QPL_STS_OK) return status;
+    
+    std::vector<uint8_t> job_buffer(job_size);
+    qpl_job* job = reinterpret_cast<qpl_job*>(job_buffer.data());
+    status = qpl_init_job(execution_path, job);
+    if (status != QPL_STS_OK) return status;
+    
+    if (use_rdma_path) {
+        job->numa_id = rdma_numa_id;
+    }
+    
+    std::vector<uint8_t> warmup_data(1024, 0xAA);
+    job->op           = qpl_op_crc64;
+    job->next_in_ptr  = warmup_data.data();
+    job->available_in = static_cast<uint32_t>(warmup_data.size());
+    job->crc64_poly   = 0x42F0E1EBA9EA3693ULL;
+    
+    status = qpl_execute_job(job);
+    qpl_fini_job(job);
+    
+    if (status != QPL_STS_OK) {
+        std::cout << "Failed (" << status << ")" << std::endl;
+        return status;
+    }
+    std::cout << "Done" << std::endl;
+    return 0;
+}
+
+int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, qpl_path_t execution_path, uint32_t &iteration, const uint32_t queue_size)
 {
     // Source and output containers
-    std::vector<uint8_t> whole_src_vector;
     std::vector<std::vector<uint8_t>> src_vector;
     std::vector<std::vector<uint8_t>> dest_vector;
+    std::vector<std::vector<uint8_t>> mask_vector;
     double elapsed_time_sec = 0;
 
-    std::cout << "[IAA Extract]" << std::endl;
+    std::cout << "[IAA Expand]" << std::endl;
     
     // Opening source file
     std::cout << "Source file = " << src_data_file_path << std::endl;
@@ -123,6 +169,7 @@ int iaa_extract(std::string src_data_file_path, std::string dest_data_file_path,
     // Allocation
     src_vector.resize(queue_size);
     dest_vector.resize(queue_size);
+    mask_vector.resize(queue_size);
     job_buffer.resize(queue_size);
     job.resize(queue_size);
 
@@ -141,7 +188,7 @@ int iaa_extract(std::string src_data_file_path, std::string dest_data_file_path,
             return 1;
         }
         if (use_rdma_path) {
-            job[i]->numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+            job[i]->numa_id = rdma_numa_id;
         }
     }
 
@@ -150,48 +197,50 @@ int iaa_extract(std::string src_data_file_path, std::string dest_data_file_path,
     std::size_t vector_size = 0;
     iteration = 0;
 
-    whole_src_vector.resize(src_file_size);
-    // Load memory 
-    src_file.read(reinterpret_cast<char *>(&whole_src_vector.front()), src_file_size);
     // Closing source file
     src_file.close();
     std::size_t current_idx = 0;
-    long long total_time_ns = 0;
+
     std::chrono::duration<int64_t, std::nano> whole_elapsed_time_ns = std::chrono::nanoseconds::zero();
-    std::chrono::duration<int64_t, std::nano> cache_control_time = std::chrono::nanoseconds::zero();
+
     auto whole_start = std::chrono::steady_clock::now();
 
-    chunk_size = src_file_left / queue_size;
-    while (chunk_size+1 > 2097152) {
-        chunk_size /= 2;
-        chunk_size + 1;
-    }
-    chunk_size += 1;
-
-    // Extraction
+    int expanded_size = 0;
+    // Expand
     while(src_file_left > 0) {
         int enqueue_cnt = 0;
         for (int i = 0; i < queue_size; ++i) {
             // Resizing source and destination vectors
-            if (src_file_left <= chunk_size) {
+            if (src_file_left <= chunk_size / 2) {
                 vector_size = src_file_left;
             } else {
-                vector_size = chunk_size;
+                vector_size = chunk_size / 2;
             }
-            dest_vector[i].resize(vector_size);            
+            mask_vector[i].resize(mask_byte_length, 0);
+            int full_bytes = vector_size / 8;
+            int remaining_bits = vector_size % 8;
 
+            if (remaining_bits > 0) {
+                mask_vector[i][full_bytes] = (0xFF << (8 - remaining_bits));
+            }
+            src_vector[i].resize(vector_size);
+            dest_vector[i].resize(mask_size);
+
+            // Loading data from source file to source vector
+            src_file.read(reinterpret_cast<char *>(&src_vector[i].front()), vector_size);
             // Performing a operation
-            job[i]->op                 = qpl_op_extract;
-            job[i]->level              = qpl_default_level;
-            job[i]->next_in_ptr        = whole_src_vector.data() + current_idx;
+            job[i]->op                 = qpl_op_expand;
+            job[i]->next_in_ptr        = src_vector[i].data();
             job[i]->next_out_ptr       = dest_vector[i].data();
             job[i]->available_in       = static_cast<uint32_t>(vector_size);
-            job[i]->available_out      = static_cast<uint32_t>(vector_size);
+            job[i]->available_out      = static_cast<uint32_t>(mask_size);
             job[i]->src1_bit_width     = input_vector_width;
-            job[i]->param_low          = lower_index;
-            job[i]->param_high         = upper_index;
-            job[i]->num_input_elements = static_cast<uint32_t>(vector_size);
-            job[i]->out_bit_width      = qpl_ow_nom;
+            job[i]->src2_bit_width     = output_vector_width;
+            job[i]->available_src2     = mask_byte_length/2;
+            job[i]->num_input_elements = mask_size/2;
+            job[i]->out_bit_width      = qpl_ow_8;
+            job[i]->next_src2_ptr      = mask_vector[i].data();
+            
 
             current_idx += vector_size;
 
@@ -213,15 +262,17 @@ int iaa_extract(std::string src_data_file_path, std::string dest_data_file_path,
         } else {
             auto start = std::chrono::steady_clock::now();
             for (int i = 0; i < enqueue_cnt; ++i) {
-                auto s = std::chrono::steady_clock::now();
                 status = qpl_submit_job(job[i]);
                 if (status != QPL_STS_OK) {
                     std::cout << "An error " << status << " acquired during job execution." << std::endl;
                     return 1;
                 }
-                auto e = std::chrono::steady_clock::now();                        
             }
             for (int i = 0; i < enqueue_cnt; ++i) {
+                if (qpl_check_job(job[i]) == QPL_STS_OK) {
+                    // std::cout << i << "th is already done" << std::endl;
+                    continue;
+                }
                 status = qpl_wait_job(job[i]);
                 if (status != QPL_STS_OK) {
                     std::cout << "An error " << status << " acquired during job waiting." << std::endl;
@@ -229,21 +280,25 @@ int iaa_extract(std::string src_data_file_path, std::string dest_data_file_path,
                 }
             }
             auto end = std::chrono::steady_clock::now();
-            
             elapsed_time_ns += end - start;
         }
 
-        // for (int i = 0; i < enqueue_cnt; ++i) {
+        for (int i = 0; i < enqueue_cnt; ++i) {
+            expanded_size += job[i]->total_out;
         //     // Opening destination file
         //     std::ofstream dest_file;
         //     dest_file.open(dest_data_file_path + "." + std::to_string(iteration + i), std::ofstream::out | std::ofstream::binary);
         //     if (!dest_file) {
         //         std::cout << "File not found : " << dest_data_file_path << std::endl;
         //         return 1;
-        //     }
+            }
 
-        //     // Writing extracted data to destination file
-        //     dest_file.write(reinterpret_cast<char *>(&dest_vector[i].front()), static_cast<std::size_t>(job[i]->total_out));
+        //     // Writing expanded data to destination file
+        //     const auto *indices = reinterpret_cast<const uint32_t *>(dest_vector[i].data());
+        //     const auto indices_byte_size = job[i]->total_out;
+        //     for(uint32_t index = 0; index < (indices_byte_size / 4); ++index) {
+        //         dest_file << src_vector[i][indices[index]];
+        //     }
 
         //     // Closing destination file
         //     dest_file.close();
@@ -254,7 +309,12 @@ int iaa_extract(std::string src_data_file_path, std::string dest_data_file_path,
         std::cout << '\r';
         std::cout << "Progress ... " << (src_file_size - src_file_left) << " / " << src_file_size << " Bytes" << std::flush;
     }
-
+    // std::cout << "Expanded size: " << expanded_size << std::endl;
+    // std::cout << "input: " << src_file_size << std::endl;
+    // std::cout << "input / (1MB) = " << (static_cast<float> (src_file_size) )/ 1024 / 1024 << std::endl;
+    // std::cout << "expected: " << std::ceil((static_cast<float> (src_file_size) )/ 1024 / 1024 ) * 2 * 1024 * 1024 << std::endl;
+    // Closing source file
+    // src_file.close();
     auto whole_end = std::chrono::steady_clock::now();
 
     whole_elapsed_time_ns += whole_end - whole_start;
@@ -267,10 +327,9 @@ int iaa_extract(std::string src_data_file_path, std::string dest_data_file_path,
             return 1;
         }
     }
-    std::cout << "total execution time: " << total_time_ns << " ns" << std::endl;
 
     std::cout << std::endl;
-    std::cout << "Extract was performed successfully." << std::endl;
+    std::cout << "Expand was performed successfully." << std::endl;
     std::cout << "Input size      = " << src_file_size << " Bytes" << std::endl;
     elapsed_time_sec = static_cast<double>(elapsed_time_ns.count()) / 1000 / 1000 / 1000;
     // std::cout << "Elapsed Time = " << elapsed_time_ns.count() << " ns (" << elapsed_time_sec << " s)" << std::endl;
@@ -296,22 +355,29 @@ auto main(int argc, char** argv) -> int {
 
     // File path
     const std::string SRC_DATA_FILE_PATH    = argv[2];
-    const std::string DEST_DATA_FILE_PATH   = SRC_DATA_FILE_PATH + ".iaa.extracted";
+    const std::string DEST_DATA_FILE_PATH   = SRC_DATA_FILE_PATH + ".iaa.expanded";
     
     const uint32_t queue_size = static_cast<uint32_t>(atoi(argv[3]));
     uint32_t iteration = 0;
 
     std::cout << "Queue Size = " << queue_size << std::endl;
     std::cout << std::endl;
+    // Expand
     chunk_size = static_cast<size_t>(atoi(argv[4]));
-    upper_index = chunk_size;
-    // Extract
-    if(iaa_extract(SRC_DATA_FILE_PATH, DEST_DATA_FILE_PATH, execution_path, iteration, queue_size) != 0) {
-        std::cout << "An error acquired during iaa_execution(extract)" << std::endl;
+    mask_size = chunk_size;
+    
+    // Warmup to establish RDMA connection before timing
+    if (do_warmup_job(execution_path) != 0) {
+        std::cout << "Warmup failed!" << std::endl;
+        return 1;
+    }
+    
+    if(iaa_expand(SRC_DATA_FILE_PATH, DEST_DATA_FILE_PATH, execution_path, iteration, queue_size) != 0) {
+        std::cout << "An error acquired during iaa_execution(Expand)" << std::endl;
         return 1;
     }
 
     return 0;
 }
 
-//* [QPL_LOW_LEVEL_EXTRACT_EXAMPLE] */
+//* [QPL_LOW_LEVEL_Expand_EXAMPLE] */
