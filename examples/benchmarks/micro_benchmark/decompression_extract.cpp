@@ -375,7 +375,7 @@ int iaa_chaining(std::string src_data_file_path, std::string dest_data_file_path
             return 1;
         }
         if (use_rdma_path) {
-            job[i]->numa_id = QPL_RDMA_REMOTE_NUMA_ID;
+            job[i]->numa_id = rdma_numa_id;
         }
     }
 

@@ -102,7 +102,9 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
         if (!rdma_client_initialized) {
             if (const char* env_ip = std::getenv("QPL_RDMA_SERVER_IP")) {
                 rdma_client_instance = &qpl::ml::dispatcher::RdmaClient::get_instance();
-                if (!rdma_client_instance->initialize(env_ip)) {
+                // Enable ODP MR only for ODP mode (-100), not for staging mode (-101)
+                bool enable_odp = (user_specified_numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID);
+                if (!rdma_client_instance->initialize(env_ip, enable_odp)) {
                     std::cerr << "[QPL] Failed to initialize RDMA client to " << env_ip << std::endl;
                     return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
                 }
@@ -152,11 +154,22 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
                 return HW_ACCELERATOR_WQ_IS_BUSY;
             }
 
-            // Copy source data to staging
+            // Copy source data to staging (always send - content can change even with same pointer)
             if (desc->src1_ptr && desc->src1_size > 0) {
                 std::memcpy(data_stg, desc->src1_ptr, desc->src1_size);
                 uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
                 client.prepare_write_with_lkey(data_stg, desc->src1_size, remote_src1, 
+                                                client.get_remote_data_block_rkey(), 
+                                                client.get_data_staging_lkey(), false);
+            }
+
+            // Copy src2 (AECS/Huffman tables for compression) to staging
+            if (desc->src2_ptr && desc->src2_size > 0) {
+                // src2 goes to block 1 in remote data area
+                uint8_t* src2_stg = static_cast<uint8_t*>(data_stg) + qpl::rdma::BLOCK_SIZE;
+                std::memcpy(src2_stg, desc->src2_ptr, desc->src2_size);
+                uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
+                client.prepare_write_with_lkey(src2_stg, desc->src2_size, remote_src2, 
                                                 client.get_remote_data_block_rkey(), 
                                                 client.get_data_staging_lkey(), false);
             }
@@ -178,26 +191,21 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
                                             client.get_remote_comp_rkey(),
                                             client.get_comp_staging_lkey(), false);
             
-            // Send descriptor to portal
-            client.prepare_write_with_lkey(desc_stg, 64, client.get_remote_portal_addr(),
-                                            client.get_remote_portal_rkey(),
+            // Send descriptor to portal (round-robin across WQs)
+            uint32_t wq_idx = client.get_next_wq_index();
+            client.prepare_write_with_lkey(desc_stg, 64, client.get_remote_portal_addr(wq_idx),
+                                            client.get_remote_portal_rkey(wq_idx),
                                             client.get_desc_staging_lkey(), true);
         } else {
             // --- ODP MODE: Use original buffers with ODP lkey ---
             if (desc->src1_ptr && desc->src1_size > 0) {
-                if (desc->src1_ptr != state_ptr->rdma_synced_src1) {
-                    uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
-                    client.prepare_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
-                    state_ptr->rdma_synced_src1 = desc->src1_ptr;
-                }
+                uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
+                client.prepare_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
             }
 
             if (desc->src2_ptr && desc->src2_size > 0) {
-                if (desc->src2_ptr != state_ptr->rdma_synced_src2) {
-                    uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
-                    client.prepare_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
-                    state_ptr->rdma_synced_src2 = desc->src2_ptr;
-                }
+                uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
+                client.prepare_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
             }
 
             uint8_t* persistent_desc_buf = client.get_local_desc_buffer(slot_id);
@@ -218,7 +226,10 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
 
             static uint8_t zero_comp[64] = {0};
             client.prepare_write(zero_comp, 64, client.get_remote_comp_addr(slot_id), client.get_remote_comp_rkey(), false);
-            client.prepare_write(persistent_desc_buf, 64, client.get_remote_portal_addr(), client.get_remote_portal_rkey(), true);
+            
+            // Send descriptor to portal (round-robin across WQs)
+            uint32_t wq_idx = client.get_next_wq_index();
+            client.prepare_write(persistent_desc_buf, 64, client.get_remote_portal_addr(wq_idx), client.get_remote_portal_rkey(wq_idx), true);
         }
 
         if (!client.commit_batch()) {

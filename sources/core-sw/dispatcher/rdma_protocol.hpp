@@ -11,6 +11,7 @@ constexpr uint32_t COMP_SIZE = 64; // 64 Bytes
 constexpr uint32_t NUM_JOBS = 128;
 constexpr uint32_t PORTAL_SIZE = 4096;
 constexpr uint32_t DESC_SIZE = 64; // Size of IAA descriptor
+constexpr uint32_t MAX_WQS = 8;    // Maximum number of WQs supported
 constexpr int32_t QPL_RDMA_REMOTE_NUMA_ID = -100;  // ODP mode (On-Demand Paging)
 constexpr int32_t QPL_RDMA_STAGING_NUMA_ID = -101; // Staging buffer mode (explicit MR)
 
@@ -22,9 +23,10 @@ constexpr int32_t QPL_RDMA_STAGING_NUMA_ID = -101; // Staging buffer mode (expli
 //   Comp: CompPoolBase + i * COMP_SIZE
 
 struct ConnPrivateData {
-    // The Portal (WQ) Memory Region
-    uint64_t portal_addr;
-    uint32_t portal_rkey;
+    // Multiple Portal (WQ) Memory Regions for round-robin dispatch
+    uint32_t num_wqs;                     // Number of WQs available (1-MAX_WQS)
+    uint64_t portal_addrs[MAX_WQS];       // Portal addresses for each WQ
+    uint32_t portal_rkeys[MAX_WQS];       // Portal rkeys for each WQ
 
     // The Data Buffer Pool (Large 2MB blocks)
     uint64_t data_pool_addr;

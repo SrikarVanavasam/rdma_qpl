@@ -9,8 +9,8 @@
  * @brief Internal HW API functions for @ref hw_check_job API implementation
  */
 
-#include <iostream>
 #include <cstring>
+#include <iostream>
 #include <unistd.h>
 
 #include "common/defs.hpp"
@@ -37,7 +37,6 @@
 // core-iaa/include
 #include "hw_completion_record_api.h"
 #include "hw_devices.h"
-
 #include "rdma_client.hpp"
 #include "rdma_protocol.hpp"
 
@@ -391,7 +390,7 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
     auto*       cfg_ptr  = GET_DCFG(state_ptr);
 
     // --- RDMA INTERCEPTION ---
-    if (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID || 
+    if (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID ||
         qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID) {
         static qpl::ml::dispatcher::RdmaClient* rdma_client_instance = nullptr;
 
@@ -403,16 +402,15 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
                     return QPL_STS_INIT_HW_NOT_SUPPORTED;
                 }
             } else {
-                std::cerr << "[QPL] RDMA NUMA ID used but QPL_RDMA_SERVER_IP not set in check_job."
-                          << std::endl;
+                std::cerr << "[QPL] RDMA NUMA ID used but QPL_RDMA_SERVER_IP not set in check_job." << std::endl;
                 return QPL_STS_INIT_HW_NOT_SUPPORTED;
             }
         }
 
-        auto& client = *rdma_client_instance;
-        bool use_staging = (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID);
+        auto& client      = *rdma_client_instance;
+        bool  use_staging = (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID);
 
-        int slot_id = state_ptr->rdma_slot_id;
+        int      slot_id          = state_ptr->rdma_slot_id;
         uint64_t remote_comp_addr = client.get_remote_comp_addr(slot_id);
 
         if (use_staging) {
@@ -422,7 +420,7 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
                 std::cerr << "[QPL] Failed to get comp staging buffer." << std::endl;
                 return QPL_STS_LIBRARY_INTERNAL_ERR;
             }
-            
+
             // Check status directly in staging
             if (comp_stg->status == 0) {
                 // Not ready locally, sync completions up to max active slot
@@ -432,9 +430,7 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
                     return QPL_STS_LIBRARY_INTERNAL_ERR;
                 }
                 // Still not ready after sync?
-                if (comp_stg->status == 0) {
-                    return QPL_STS_BEING_PROCESSED;
-                }
+                if (comp_stg->status == 0) { return QPL_STS_BEING_PROCESSED; }
             }
             // Copy final result to QPL's internal comp_ptr
             std::memcpy(comp_ptr, comp_stg, sizeof(*comp_ptr));
@@ -448,8 +444,8 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
 
         if (comp_ptr->status == 0) { return QPL_STS_BEING_PROCESSED; }
 
-        uint32_t output_size = comp_ptr->output_size;
-        bool is_stats_pass = (qpl_job_ptr->op == qpl_op_compress) && (ADCF_STATS_MODE & desc_ptr->decomp_flags);
+        uint32_t output_size   = comp_ptr->output_size;
+        bool     is_stats_pass = (qpl_job_ptr->op == qpl_op_compress) && (ADCF_STATS_MODE & desc_ptr->decomp_flags);
 
         if (output_size > 0 && qpl_job_ptr->next_out_ptr != nullptr && !is_stats_pass) {
             uint32_t copy_size = output_size;
@@ -459,16 +455,16 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
                 copy_size = qpl_job_ptr->available_out;
             }
             uint64_t remote_dst_addr = client.get_remote_data_block_addr(slot_id, 2);
-            
+
             if (use_staging) {
-                // Staging mode: read into staging buffer, then copy to user
-                void* data_stg = client.get_data_staging(slot_id);
-                if (!client.rdma_read_with_lkey(data_stg, copy_size, remote_dst_addr,
-                                                 client.get_remote_data_block_rkey(), client.get_data_staging_lkey())) {
+                // Staging mode: read into staging buffer (dst is at block 2), then copy to user
+                uint8_t* dst_stg = static_cast<uint8_t*>(client.get_data_staging(slot_id)) + 2 * qpl::rdma::BLOCK_SIZE;
+                if (!client.rdma_read_with_lkey(dst_stg, copy_size, remote_dst_addr,
+                                                client.get_remote_data_block_rkey(), client.get_data_staging_lkey())) {
                     std::cerr << "[QPL] Failed RDMA read for remote output data (staging)." << std::endl;
                     return QPL_STS_LIBRARY_INTERNAL_ERR;
                 }
-                std::memcpy(qpl_job_ptr->next_out_ptr, data_stg, copy_size);
+                std::memcpy(qpl_job_ptr->next_out_ptr, dst_stg, copy_size);
             } else {
                 // ODP mode
                 if (!client.rdma_read(qpl_job_ptr->next_out_ptr, copy_size, remote_dst_addr,
@@ -479,15 +475,15 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
             }
         } else if (is_stats_pass && output_size > 0 && desc_ptr->dst_ptr) {
             uint64_t remote_dst_addr = client.get_remote_data_block_addr(slot_id, 2);
-            
+
             if (use_staging) {
-                void* data_stg = client.get_data_staging(slot_id);
-                if (!client.rdma_read_with_lkey(data_stg, output_size, remote_dst_addr,
-                                                 client.get_remote_data_block_rkey(), client.get_data_staging_lkey())) {
+                uint8_t* dst_stg = static_cast<uint8_t*>(client.get_data_staging(slot_id)) + 2 * qpl::rdma::BLOCK_SIZE;
+                if (!client.rdma_read_with_lkey(dst_stg, output_size, remote_dst_addr,
+                                                client.get_remote_data_block_rkey(), client.get_data_staging_lkey())) {
                     std::cerr << "[QPL] Failed RDMA read for remote histogram (staging)." << std::endl;
                     return QPL_STS_LIBRARY_INTERNAL_ERR;
                 }
-                std::memcpy(const_cast<uint8_t*>(desc_ptr->dst_ptr), data_stg, output_size);
+                std::memcpy(const_cast<uint8_t*>(desc_ptr->dst_ptr), dst_stg, output_size);
             } else {
                 if (!client.rdma_read(const_cast<uint8_t*>(desc_ptr->dst_ptr), output_size, remote_dst_addr,
                                       client.get_remote_data_block_rkey())) {

@@ -17,11 +17,12 @@
 using namespace qpl::rdma;
 
 struct ServerContext {
-    std::string dev_path;
+    std::vector<std::string> wq_paths;  // Paths to WQ devices
+    uint32_t                 num_wqs = 0;
 
-    // Portal
-    void*          portal_buf = nullptr;
-    struct ibv_mr* mr_portal  = nullptr;
+    // Portals (one per WQ)
+    void*          portal_bufs[MAX_WQS] = {};
+    struct ibv_mr* mr_portals[MAX_WQS]  = {};
 
     // Data Pool
     void*          data_pool_buf  = nullptr;
@@ -48,16 +49,22 @@ static int on_connect_request(struct rdma_cm_id* id, ServerContext* ctx) {
     std::cout << "[Server] Received connection request." << std::endl;
     ctx->cm_id = id;
 
+    // Zero completion and data pools to prevent stale state from previous connections
+    std::memset(ctx->comp_pool_buf, 0, ctx->comp_pool_size);
+    std::memset(ctx->data_pool_buf, 0, ctx->data_pool_size);
+    std::cout << "[Server] Cleared completion and data pools for new connection." << std::endl;
+
     // 1. Allocate Protection Domain
     ctx->pd = ibv_alloc_pd(id->verbs);
     if (!ctx->pd) die("ibv_alloc_pd");
 
     // 2. Register Memory Regions
-    // Portal: Local Write (to clear/reset?), Remote Write (Submission), Remote Read (Debugging?)
-    // Note: User example used LOCAL_WRITE | REMOTE_WRITE | REMOTE_READ
-    ctx->mr_portal = ibv_reg_mr(ctx->pd, ctx->portal_buf, PORTAL_SIZE,
-                                IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ);
-    if (!ctx->mr_portal) die("ibv_reg_mr portal");
+    // Portals: Local Write (to clear/reset?), Remote Write (Submission), Remote Read (Debugging?)
+    for (uint32_t i = 0; i < ctx->num_wqs; i++) {
+        ctx->mr_portals[i] = ibv_reg_mr(ctx->pd, ctx->portal_bufs[i], PORTAL_SIZE,
+                                         IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ);
+        if (!ctx->mr_portals[i]) die("ibv_reg_mr portal " + std::to_string(i));
+    }
 
     // Data Pool: Local Write (Init), Remote Write (Input), Remote Read (Output)
     ctx->mr_data_pool = ibv_reg_mr(ctx->pd, ctx->data_pool_buf, ctx->data_pool_size,
@@ -89,8 +96,12 @@ static int on_connect_request(struct rdma_cm_id* id, ServerContext* ctx) {
     struct rdma_conn_param cm_params = {};
     ConnPrivateData        pdata     = {};
 
-    pdata.portal_addr = (uint64_t)ctx->portal_buf;
-    pdata.portal_rkey = ctx->mr_portal->rkey;
+    // Populate portal info for all WQs
+    pdata.num_wqs = ctx->num_wqs;
+    for (uint32_t i = 0; i < ctx->num_wqs; i++) {
+        pdata.portal_addrs[i] = (uint64_t)ctx->portal_bufs[i];
+        pdata.portal_rkeys[i] = ctx->mr_portals[i]->rkey;
+    }
 
     pdata.data_pool_addr  = (uint64_t)ctx->data_pool_buf;
     pdata.data_pool_rkey  = ctx->mr_data_pool->rkey;
@@ -116,9 +127,12 @@ static int on_disconnect(struct rdma_cm_id* id, ServerContext* ctx) {
 
     rdma_destroy_qp(id);
 
-    if (ctx->mr_portal) {
-        ibv_dereg_mr(ctx->mr_portal);
-        ctx->mr_portal = nullptr;
+    // Deregister portal MRs
+    for (uint32_t i = 0; i < ctx->num_wqs; i++) {
+        if (ctx->mr_portals[i]) {
+            ibv_dereg_mr(ctx->mr_portals[i]);
+            ctx->mr_portals[i] = nullptr;
+        }
     }
     if (ctx->mr_data_pool) {
         ibv_dereg_mr(ctx->mr_data_pool);
@@ -150,33 +164,90 @@ static int on_event(struct rdma_cm_event* event, ServerContext* ctx) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <device_wq_path>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <device_wq_path> [<device_wq_path>...]" << std::endl;
+        std::cerr << "Example: " << argv[0] << " /dev/iax/wq0.0 /dev/iax/wq0.1" << std::endl;
         return 1;
     }
 
     ServerContext ctx;
-    ctx.dev_path = argv[1];
+    
+    // Parse multiple WQ paths (limit to MAX_WQS)
+    ctx.num_wqs = std::min(static_cast<uint32_t>(argc - 1), MAX_WQS);
+    for (uint32_t i = 0; i < ctx.num_wqs; i++) {
+        ctx.wq_paths.push_back(argv[i + 1]);
+    }
 
-    // 1. Map Portal
-    int fd = open(ctx.dev_path.c_str(), O_RDWR);
-    if (fd < 0) die("open device");
+    std::cout << "[Server] Configuring " << ctx.num_wqs << " WQ(s):" << std::endl;
+    
+    // 1. Map Portals for each WQ
+    for (uint32_t i = 0; i < ctx.num_wqs; i++) {
+        int fd = open(ctx.wq_paths[i].c_str(), O_RDWR);
+        if (fd < 0) {
+            std::cerr << "[Server] Failed to open WQ " << i << ": " << ctx.wq_paths[i] << std::endl;
+            die("open device");
+        }
 
-    ctx.portal_buf = mmap(NULL, PORTAL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (ctx.portal_buf == MAP_FAILED) die("mmap portal");
-    close(fd); // Can close fd after mmap
+        ctx.portal_bufs[i] = mmap(NULL, PORTAL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (ctx.portal_bufs[i] == MAP_FAILED) {
+            std::cerr << "[Server] Failed to mmap portal " << i << std::endl;
+            die("mmap portal");
+        }
+        close(fd); // Can close fd after mmap
+        
+        std::cout << "  WQ " << i << ": " << ctx.wq_paths[i] << " -> " << ctx.portal_bufs[i] << std::endl;
+    }
 
     // 2. Allocate Buffers
     // Data Pool: 3 blocks per job * NUM_JOBS * BLOCK_SIZE
     ctx.data_pool_size = NUM_JOBS * 3 * BLOCK_SIZE;
-    // TODO: Use hugepages for data pool to ensure large pages are used
-    if (posix_memalign(&ctx.data_pool_buf, 2 * 1024 * 1024, ctx.data_pool_size)) die("posix_memalign data pool");
+    
+    // Use huge pages (2MB) for better TLB performance and pre-faulted memory
+    ctx.data_pool_buf = mmap(nullptr, ctx.data_pool_size,
+                              PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE,
+                              -1, 0);
+    
+    if (ctx.data_pool_buf == MAP_FAILED) {
+        std::cerr << "[Server] Huge pages unavailable for data pool, falling back to regular pages" << std::endl;
+        ctx.data_pool_buf = mmap(nullptr, ctx.data_pool_size,
+                                  PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE,
+                                  -1, 0);
+        if (ctx.data_pool_buf == MAP_FAILED) die("mmap data pool");
+    } else {
+        std::cout << "[Server] Using huge pages for data pool (" << (ctx.data_pool_size / (1024*1024)) << " MB)" << std::endl;
+    }
+    
+    // Pin in memory to prevent swapping and ensure consistent performance
+    if (mlock(ctx.data_pool_buf, ctx.data_pool_size) != 0) {
+        std::cerr << "[Server] Warning: mlock failed for data pool: " << strerror(errno) << std::endl;
+    }
     std::memset(ctx.data_pool_buf, 0, ctx.data_pool_size);
 
     // Comp Pool: NUM_JOBS * COMP_SIZE (64B)
     ctx.comp_pool_size = NUM_JOBS * COMP_SIZE;
-    // TODO: Use hugepages for completion pool
-    if (posix_memalign(&ctx.comp_pool_buf, 64, ctx.comp_pool_size)) // 64-byte alignment
-        die("posix_memalign comp pool");
+    
+    // Completion pool is smaller, use huge pages with fallback
+    ctx.comp_pool_buf = mmap(nullptr, ctx.comp_pool_size,
+                              PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE,
+                              -1, 0);
+    
+    if (ctx.comp_pool_buf == MAP_FAILED) {
+        std::cerr << "[Server] Huge pages unavailable for comp pool, falling back to regular pages" << std::endl;
+        ctx.comp_pool_buf = mmap(nullptr, ctx.comp_pool_size,
+                                  PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE,
+                                  -1, 0);
+        if (ctx.comp_pool_buf == MAP_FAILED) die("mmap comp pool");
+    } else {
+        std::cout << "[Server] Using huge pages for comp pool (" << (ctx.comp_pool_size / 1024) << " KB)" << std::endl;
+    }
+    
+    // Pin completion pool in memory
+    if (mlock(ctx.comp_pool_buf, ctx.comp_pool_size) != 0) {
+        std::cerr << "[Server] Warning: mlock failed for comp pool: " << strerror(errno) << std::endl;
+    }
     std::memset(ctx.comp_pool_buf, 0, ctx.comp_pool_size);
 
     // 3. Setup RDMA Listener
@@ -205,9 +276,18 @@ int main(int argc, char** argv) {
     }
 
     // Cleanup
-    if (ctx.data_pool_buf) free(ctx.data_pool_buf);
-    if (ctx.comp_pool_buf) free(ctx.comp_pool_buf);
-    if (ctx.portal_buf) munmap(ctx.portal_buf, PORTAL_SIZE);
+    if (ctx.data_pool_buf) {
+        munlock(ctx.data_pool_buf, ctx.data_pool_size);
+        munmap(ctx.data_pool_buf, ctx.data_pool_size);
+    }
+    if (ctx.comp_pool_buf) {
+        munlock(ctx.comp_pool_buf, ctx.comp_pool_size);
+        munmap(ctx.comp_pool_buf, ctx.comp_pool_size);
+    }
+    // Unmap all portals
+    for (uint32_t i = 0; i < ctx.num_wqs; i++) {
+        if (ctx.portal_bufs[i]) munmap(ctx.portal_bufs[i], PORTAL_SIZE);
+    }
 
     rdma_destroy_event_channel(ec);
     rdma_destroy_id(ctx.listen_id);

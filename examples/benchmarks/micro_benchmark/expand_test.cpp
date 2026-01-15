@@ -140,6 +140,7 @@ int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, 
     std::vector<std::vector<uint8_t>> src_vector;
     std::vector<std::vector<uint8_t>> dest_vector;
     std::vector<std::vector<uint8_t>> mask_vector;
+    std::vector<uint8_t> whole_src_vector;
     double elapsed_time_sec = 0;
 
     std::cout << "[IAA Expand]" << std::endl;
@@ -153,12 +154,17 @@ int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, 
         std::cout << "File not found : " << src_data_file_path << std::endl;
         return 1;
     }
-    std::cout << "Done" << std::endl;
 
     // Getting source file size
     src_file.seekg(0, std::ios::end);
     std::size_t src_file_size = static_cast<std::size_t>(src_file.tellg());
     src_file.seekg(0, std::ios::beg);
+
+    // Pre-load source file into memory
+    whole_src_vector.resize(src_file_size);
+    src_file.read(reinterpret_cast<char*>(whole_src_vector.data()), src_file_size);
+    src_file.close();
+    std::cout << "Done" << std::endl;
 
     // Job initialization
     std::vector<std::unique_ptr<uint8_t[]>> job_buffer;
@@ -192,132 +198,104 @@ int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, 
         }
     }
 
+    // Initialize buffers for all jobs
+    for(int i = 0; i < queue_size; i++) {
+        src_vector[i].resize(chunk_size);
+        dest_vector[i].resize(mask_size);
+        mask_vector[i].resize(mask_byte_length, 0);
+    }
+
     std::chrono::duration<int64_t, std::nano> elapsed_time_ns = std::chrono::nanoseconds::zero();
     std::size_t src_file_left = src_file_size;
     std::size_t vector_size = 0;
     iteration = 0;
-
-    // Closing source file
-    src_file.close();
     std::size_t current_idx = 0;
-
-    std::chrono::duration<int64_t, std::nano> whole_elapsed_time_ns = std::chrono::nanoseconds::zero();
 
     auto whole_start = std::chrono::steady_clock::now();
 
-    int expanded_size = 0;
-    // Expand
-    while(src_file_left > 0) {
-        int enqueue_cnt = 0;
-        for (int i = 0; i < queue_size; ++i) {
-            // Resizing source and destination vectors
+    // Pipelined Execution
+    int current_job_idx = 0;
+    int jobs_in_flight = 0;
+    int oldest_job_idx = 0;
+    
+    // Fill the pipeline and process
+    while (src_file_left > 0 || jobs_in_flight > 0) {
+        
+        // Submit jobs while we have data and queue space
+        while (src_file_left > 0 && jobs_in_flight < queue_size) {
+            
+            // Prepare job
             if (src_file_left <= chunk_size / 2) {
                 vector_size = src_file_left;
             } else {
                 vector_size = chunk_size / 2;
             }
-            mask_vector[i].resize(mask_byte_length, 0);
+
             int full_bytes = vector_size / 8;
             int remaining_bits = vector_size % 8;
-
-            if (remaining_bits > 0) {
-                mask_vector[i][full_bytes] = (0xFF << (8 - remaining_bits));
-            }
-            src_vector[i].resize(vector_size);
-            dest_vector[i].resize(mask_size);
-
-            // Loading data from source file to source vector
-            src_file.read(reinterpret_cast<char *>(&src_vector[i].front()), vector_size);
-            // Performing a operation
-            job[i]->op                 = qpl_op_expand;
-            job[i]->next_in_ptr        = src_vector[i].data();
-            job[i]->next_out_ptr       = dest_vector[i].data();
-            job[i]->available_in       = static_cast<uint32_t>(vector_size);
-            job[i]->available_out      = static_cast<uint32_t>(mask_size);
-            job[i]->src1_bit_width     = input_vector_width;
-            job[i]->src2_bit_width     = output_vector_width;
-            job[i]->available_src2     = mask_byte_length/2;
-            job[i]->num_input_elements = mask_size/2;
-            job[i]->out_bit_width      = qpl_ow_8;
-            job[i]->next_src2_ptr      = mask_vector[i].data();
             
+            // Reset mask
+            std::fill(mask_vector[current_job_idx].begin(), mask_vector[current_job_idx].end(), 0);
+            if (remaining_bits > 0) {
+                mask_vector[current_job_idx][full_bytes] = (0xFF << (8 - remaining_bits));
+            }
 
+            // Setup job descriptor
+            job[current_job_idx]->op                 = qpl_op_expand;
+            job[current_job_idx]->next_in_ptr        = whole_src_vector.data() + current_idx;
+            job[current_job_idx]->next_out_ptr       = dest_vector[current_job_idx].data();
+            job[current_job_idx]->available_in       = static_cast<uint32_t>(vector_size);
+            job[current_job_idx]->available_out      = static_cast<uint32_t>(mask_size);
+            job[current_job_idx]->src1_bit_width     = input_vector_width;
+            job[current_job_idx]->src2_bit_width     = output_vector_width;
+            job[current_job_idx]->available_src2     = mask_byte_length/2;
+            job[current_job_idx]->num_input_elements = mask_size/2;
+            job[current_job_idx]->out_bit_width      = qpl_ow_8;
+            job[current_job_idx]->next_src2_ptr      = mask_vector[current_job_idx].data();
+
+            // Submit
+            if(execution_path == qpl_path_software) {
+                status = qpl_execute_job(job[current_job_idx]);
+                // Software path is synchronous usually, but we still count it as "flight" logic for uniformity 
+                // (though for software path qpl_execute_job blocks).
+            } else {
+                status = qpl_submit_job(job[current_job_idx]);
+            }
+            
+            if (status != QPL_STS_OK) {
+                std::cout << "An error " << status << " acquired during job submission." << std::endl;
+                return 1;
+            }
+
+            // Update state
             current_idx += vector_size;
-
             src_file_left -= vector_size;
-            enqueue_cnt = i + 1;
-            if (src_file_left == 0) { break; }
+            jobs_in_flight++;
+            current_job_idx = (current_job_idx + 1) % queue_size;
+            
+            // Show progress
+            if (current_idx % (chunk_size * 10) == 0) {
+                std::cout << '\r' << "Progress ... " << current_idx << " / " << src_file_size << " Bytes" << std::flush;
+            }
         }
 
-        // Submit & Waiting
-        if(execution_path == qpl_path_software) {
-            std::vector<std::thread *> job_th;
-            job_th.resize(enqueue_cnt);
-            auto start = std::chrono::steady_clock::now();
-            for (int i = 0; i < enqueue_cnt; ++i) { job_th[i] = new std::thread(job_execution, job[i]); }
-            for (int i = 0; i < enqueue_cnt; ++i) { job_th[i]->join(); }
-            auto end = std::chrono::steady_clock::now();
-            elapsed_time_ns += end - start;
-            for (int i = 0; i < enqueue_cnt; ++i) { delete job_th[i]; }
-        } else {
-            auto start = std::chrono::steady_clock::now();
-            for (int i = 0; i < enqueue_cnt; ++i) {
-                status = qpl_submit_job(job[i]);
+        // Wait for oldest job (if pipeline full or no more data)
+        if (jobs_in_flight > 0) {
+            if (execution_path != qpl_path_software) {
+                status = qpl_wait_job(job[oldest_job_idx]);
                 if (status != QPL_STS_OK) {
-                    std::cout << "An error " << status << " acquired during job execution." << std::endl;
-                    return 1;
+                     std::cout << "An error " << status << " acquired during job waiting." << std::endl;
+                     return 1;
                 }
             }
-            for (int i = 0; i < enqueue_cnt; ++i) {
-                if (qpl_check_job(job[i]) == QPL_STS_OK) {
-                    // std::cout << i << "th is already done" << std::endl;
-                    continue;
-                }
-                status = qpl_wait_job(job[i]);
-                if (status != QPL_STS_OK) {
-                    std::cout << "An error " << status << " acquired during job waiting." << std::endl;
-                    return 1;
-                }
-            }
-            auto end = std::chrono::steady_clock::now();
-            elapsed_time_ns += end - start;
+            
+            jobs_in_flight--;
+            oldest_job_idx = (oldest_job_idx + 1) % queue_size;
         }
-
-        for (int i = 0; i < enqueue_cnt; ++i) {
-            expanded_size += job[i]->total_out;
-        //     // Opening destination file
-        //     std::ofstream dest_file;
-        //     dest_file.open(dest_data_file_path + "." + std::to_string(iteration + i), std::ofstream::out | std::ofstream::binary);
-        //     if (!dest_file) {
-        //         std::cout << "File not found : " << dest_data_file_path << std::endl;
-        //         return 1;
-            }
-
-        //     // Writing expanded data to destination file
-        //     const auto *indices = reinterpret_cast<const uint32_t *>(dest_vector[i].data());
-        //     const auto indices_byte_size = job[i]->total_out;
-        //     for(uint32_t index = 0; index < (indices_byte_size / 4); ++index) {
-        //         dest_file << src_vector[i][indices[index]];
-        //     }
-
-        //     // Closing destination file
-        //     dest_file.close();
-        // }
-
-        iteration += enqueue_cnt;
-
-        std::cout << '\r';
-        std::cout << "Progress ... " << (src_file_size - src_file_left) << " / " << src_file_size << " Bytes" << std::flush;
     }
-    // std::cout << "Expanded size: " << expanded_size << std::endl;
-    // std::cout << "input: " << src_file_size << std::endl;
-    // std::cout << "input / (1MB) = " << (static_cast<float> (src_file_size) )/ 1024 / 1024 << std::endl;
-    // std::cout << "expected: " << std::ceil((static_cast<float> (src_file_size) )/ 1024 / 1024 ) * 2 * 1024 * 1024 << std::endl;
-    // Closing source file
-    // src_file.close();
-    auto whole_end = std::chrono::steady_clock::now();
 
-    whole_elapsed_time_ns += whole_end - whole_start;
+    auto whole_end = std::chrono::steady_clock::now();
+    elapsed_time_ns = whole_end - whole_start;
 
     // Freeing resources
     for (int i = 0; i < queue_size; ++i) {
@@ -332,9 +310,6 @@ int iaa_expand(std::string src_data_file_path, std::string dest_data_file_path, 
     std::cout << "Expand was performed successfully." << std::endl;
     std::cout << "Input size      = " << src_file_size << " Bytes" << std::endl;
     elapsed_time_sec = static_cast<double>(elapsed_time_ns.count()) / 1000 / 1000 / 1000;
-    // std::cout << "Elapsed Time = " << elapsed_time_ns.count() << " ns (" << elapsed_time_sec << " s)" << std::endl;
-    // double whole_elapsed_time_sec = static_cast<double>(whole_elapsed_time_ns.count()) / 1000 / 1000 / 1000;
-    // std::cout << "Whole elapsed Time = " << whole_elapsed_time_ns.count() << " ns (" << whole_elapsed_time_sec << " s)" << std::endl;
     std::cout << "Bandwidth       = " << static_cast<double>(src_file_size) / 1024 / 1024 / elapsed_time_sec << " MB/s" << std::endl;
 
     return 0;

@@ -22,8 +22,9 @@ public:
     RdmaClient(const RdmaClient&) = delete;
     RdmaClient& operator=(const RdmaClient&) = delete;
 
-    // Initialize the client connection to the specified server IP
-    bool initialize(const std::string& server_ip);
+    // Initialize the RDMA client connection to the server
+    // enable_odp: if true, register ODP MR for zero-copy access; if false, only use staging buffers
+    bool initialize(const std::string& server_ip, bool enable_odp = true);
 
     // Check if the client is initialized and ready
     bool is_initialized() const { return initialized_; }
@@ -57,9 +58,17 @@ public:
     uint64_t get_remote_comp_addr(int slot_id);
     uint32_t get_remote_comp_rkey();
 
-    // Get the remote portal address and rkey
+    // Get the remote portal address and rkey (round-robin across WQs)
     uint64_t get_remote_portal_addr();
     uint32_t get_remote_portal_rkey();
+    
+    // Get portal for specific WQ index
+    uint64_t get_remote_portal_addr(uint32_t wq_idx);
+    uint32_t get_remote_portal_rkey(uint32_t wq_idx);
+    
+    // Get number of WQs and next WQ index (round-robin)
+    uint32_t get_num_wqs() const;
+    uint32_t get_next_wq_index();  // Returns and increments wq_index_ with wrap
 
     // Get the local descriptor buffer for a specific slot (ODP mode)
     uint8_t* get_local_desc_buffer(int slot_id);
@@ -115,14 +124,19 @@ private:
     struct ibv_mr* comp_staging_mr_ = nullptr;
 
     bool initialized_ = false;
+    bool odp_enabled_ = false;  // True if ODP MR was registered
     std::string server_ip_;
     
     rdma::ConnPrivateData remote_config_; // Stores the configuration from the server
 
-    // Job slot management
+    // Job slot management - push in reverse order so stack pops 0,1,2...
     std::stack<int> free_job_slots_;
     std::mutex      slot_mutex_;
     int             max_active_slot_ = -1;  // Highest slot ID currently active
+    
+    // Multi-WQ round-robin dispatch
+    // TODO: Make atomic if adding multi-threading support
+    uint32_t        wq_index_ = 0;  // Current WQ index for round-robin
     
     // Helper to cleanup RDMA resources
     void cleanup_rdma_resources();

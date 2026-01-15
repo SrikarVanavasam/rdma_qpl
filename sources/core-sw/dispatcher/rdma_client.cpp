@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <netdb.h>
+#include <sys/mman.h>
 
 namespace qpl::ml::dispatcher {
 
@@ -33,7 +34,11 @@ void RdmaClient::cleanup_rdma_resources() {
     if (desc_staging_mr_) { ibv_dereg_mr(desc_staging_mr_); desc_staging_mr_ = nullptr; }
     if (comp_staging_mr_) { ibv_dereg_mr(comp_staging_mr_); comp_staging_mr_ = nullptr; }
     // Cleanup staging pools
-    if (data_staging_pool_) { free(data_staging_pool_); data_staging_pool_ = nullptr; }
+    if (data_staging_pool_) {
+        munlock(data_staging_pool_, rdma::NUM_JOBS * 3 * rdma::BLOCK_SIZE);
+        munmap(data_staging_pool_, rdma::NUM_JOBS * 3 * rdma::BLOCK_SIZE);
+        data_staging_pool_ = nullptr;
+    }
     if (desc_staging_pool_) { free(desc_staging_pool_); desc_staging_pool_ = nullptr; }
     if (comp_staging_pool_) { free(comp_staging_pool_); comp_staging_pool_ = nullptr; }
     if (qp_) {
@@ -60,10 +65,11 @@ void RdmaClient::cleanup_rdma_resources() {
     initialized_ = false;
 }
 
-bool RdmaClient::initialize(const std::string& server_ip) {
+bool RdmaClient::initialize(const std::string& server_ip, bool enable_odp) {
     if (initialized_) return true;
 
     server_ip_ = server_ip;
+    odp_enabled_ = enable_odp;
 
     ec_ = rdma_create_event_channel();
     if (!ec_) return false;
@@ -106,15 +112,20 @@ bool RdmaClient::initialize(const std::string& server_ip) {
         return false;
     }
 
-    send_mr_ = ibv_reg_mr(
-            pd_, NULL, SIZE_MAX,
-            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_ON_DEMAND);
+    // Only register ODP MR if ODP mode is enabled
+    if (enable_odp) {
+        send_mr_ = ibv_reg_mr(
+                pd_, NULL, SIZE_MAX,
+                IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_ON_DEMAND);
 
-    if (!send_mr_) {
-        std::cerr << "[RdmaClient] Failed to register ODP MR: " << strerror(errno) << std::endl;
-        std::cerr << "             Ensure your device and kernel support On-Demand Paging." << std::endl;
-        cleanup_rdma_resources();
-        return false;
+        if (!send_mr_) {
+            std::cerr << "[RdmaClient] Failed to register ODP MR: " << strerror(errno) << std::endl;
+            std::cerr << "             Ensure your device and kernel support On-Demand Paging." << std::endl;
+            cleanup_rdma_resources();
+            return false;
+        }
+    } else {
+        send_mr_ = nullptr;  // Not using ODP, staging buffers only
     }
 
     cq_ = ibv_create_cq(cm_id_->verbs, rdma::NUM_JOBS * 4, NULL, NULL, 0);
@@ -171,6 +182,8 @@ bool RdmaClient::initialize(const std::string& server_ip) {
     }
     remote_config_ = *reinterpret_cast<const rdma::ConnPrivateData*>(event->param.conn.private_data);
     rdma_ack_cm_event(event);
+    
+    std::cout << "[RdmaClient] Connected to server with " << remote_config_.num_wqs << " WQ(s)" << std::endl;
 
     // Allocate local descriptor pool (64-byte aligned)
     // No need to register MR as we use ODP (send_mr_)
@@ -181,14 +194,42 @@ bool RdmaClient::initialize(const std::string& server_ip) {
     std::memset(local_desc_pool_, 0, rdma::NUM_JOBS * rdma::DESC_SIZE);
 
     // Allocate and register staging pools (for staging mode - explicit MR, no ODP)
-    // Data staging pool: NUM_JOBS * BLOCK_SIZE (e.g., 128 * 2MB = 256MB)
-    if (posix_memalign(&data_staging_pool_, 64, rdma::NUM_JOBS * rdma::BLOCK_SIZE)) {
-        cleanup_rdma_resources();
-        return false;
-    }
-    std::memset(data_staging_pool_, 0, rdma::NUM_JOBS * rdma::BLOCK_SIZE);
+    // Data staging pool: NUM_JOBS * 3 * BLOCK_SIZE (src1, src2, dst per slot to match server)
+    // Use huge pages (2MB) for better TLB performance and pre-faulted memory
+    size_t data_pool_size = rdma::NUM_JOBS * 3 * rdma::BLOCK_SIZE;
     
-    data_staging_mr_ = ibv_reg_mr(pd_, data_staging_pool_, rdma::NUM_JOBS * rdma::BLOCK_SIZE,
+    // Try huge pages first (MAP_HUGETLB), fall back to regular pages if unavailable
+    data_staging_pool_ = mmap(nullptr, data_pool_size,
+                               PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE,
+                               -1, 0);
+    
+    if (data_staging_pool_ == MAP_FAILED) {
+        std::cerr << "[RdmaClient] Huge pages unavailable, falling back to regular pages" << std::endl;
+        data_staging_pool_ = mmap(nullptr, data_pool_size,
+                                   PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE,
+                                   -1, 0);
+        if (data_staging_pool_ == MAP_FAILED) {
+            std::cerr << "[RdmaClient] Failed to allocate data staging pool: " << strerror(errno) << std::endl;
+            data_staging_pool_ = nullptr;
+            cleanup_rdma_resources();
+            return false;
+        }
+    } else {
+        std::cout << "[RdmaClient] Using huge pages for data staging pool" << std::endl;
+    }
+    
+    // Pin in memory to prevent swapping and ensure consistent performance
+    if (mlock(data_staging_pool_, data_pool_size) != 0) {
+        std::cerr << "[RdmaClient] Warning: mlock failed (may need CAP_IPC_LOCK): " << strerror(errno) << std::endl;
+        // Continue anyway - mlock is optional
+    }
+    
+    // Touch all pages to ensure they're faulted in (MAP_POPULATE should do this, but be safe)
+    std::memset(data_staging_pool_, 0, data_pool_size);
+    
+    data_staging_mr_ = ibv_reg_mr(pd_, data_staging_pool_, data_pool_size,
                                    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE);
     if (!data_staging_mr_) {
         std::cerr << "[RdmaClient] Failed to register data staging MR: " << strerror(errno) << std::endl;
@@ -226,12 +267,13 @@ bool RdmaClient::initialize(const std::string& server_ip) {
         return false;
     }
 
-    std::cout << "[RdmaClient] Staging pools allocated: Data=" << (rdma::NUM_JOBS * rdma::BLOCK_SIZE / (1024*1024)) 
+    std::cout << "[RdmaClient] Staging pools allocated: Data=" << (rdma::NUM_JOBS * 3 * rdma::BLOCK_SIZE / (1024*1024)) 
               << "MB, Desc=" << (rdma::NUM_JOBS * rdma::DESC_SIZE / 1024) << "KB, Comp=" 
               << (rdma::NUM_JOBS * rdma::COMP_SIZE / 1024) << "KB" << std::endl;
 
     std::lock_guard<std::mutex> lock(slot_mutex_);
-    for (uint32_t i = 0; i < rdma::NUM_JOBS; ++i) {
+    // Push in reverse order so stack pops 0, 1, 2... (low slots first for accurate max_active_slot)
+    for (int i = rdma::NUM_JOBS - 1; i >= 0; --i) {
         free_job_slots_.push(i);
     }
 
@@ -430,10 +472,36 @@ uint32_t RdmaClient::get_remote_comp_rkey() {
 }
 
 uint64_t RdmaClient::get_remote_portal_addr() {
-    return remote_config_.portal_addr;
+    // Use round-robin: get current WQ index and use it
+    // Note: wq_index_ should be incremented by get_next_wq_index() before calling this
+    uint32_t idx = wq_index_ % remote_config_.num_wqs;
+    return remote_config_.portal_addrs[idx];
 }
 uint32_t RdmaClient::get_remote_portal_rkey() {
-    return remote_config_.portal_rkey;
+    uint32_t idx = wq_index_ % remote_config_.num_wqs;
+    return remote_config_.portal_rkeys[idx];
+}
+
+uint64_t RdmaClient::get_remote_portal_addr(uint32_t wq_idx) {
+    if (wq_idx >= remote_config_.num_wqs) wq_idx = 0;
+    return remote_config_.portal_addrs[wq_idx];
+}
+
+uint32_t RdmaClient::get_remote_portal_rkey(uint32_t wq_idx) {
+    if (wq_idx >= remote_config_.num_wqs) wq_idx = 0;
+    return remote_config_.portal_rkeys[wq_idx];
+}
+
+uint32_t RdmaClient::get_num_wqs() const {
+    return remote_config_.num_wqs;
+}
+
+uint32_t RdmaClient::get_next_wq_index() {
+    // Return current index and increment (with wrap)
+    // TODO: Make atomic if adding multi-threading support
+    uint32_t idx = wq_index_;
+    wq_index_ = (wq_index_ + 1) % remote_config_.num_wqs;
+    return idx;
 }
 
 uint8_t* RdmaClient::get_local_desc_buffer(int slot_id) {
@@ -444,7 +512,8 @@ uint8_t* RdmaClient::get_local_desc_buffer(int slot_id) {
 // Staging buffer accessors
 void* RdmaClient::get_data_staging(int slot_id) {
     if (slot_id < 0 || static_cast<uint32_t>(slot_id) >= rdma::NUM_JOBS || !data_staging_pool_) return nullptr;
-    return static_cast<uint8_t*>(data_staging_pool_) + static_cast<size_t>(slot_id) * rdma::BLOCK_SIZE;
+    // Each slot has 3 blocks: src1, src2, dst (matches remote server layout)
+    return static_cast<uint8_t*>(data_staging_pool_) + static_cast<size_t>(slot_id) * 3 * rdma::BLOCK_SIZE;
 }
 
 void* RdmaClient::get_desc_staging(int slot_id) {
