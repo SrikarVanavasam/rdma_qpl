@@ -12,7 +12,6 @@
 
 // Magic NUMA IDs for Remote RDMA
 #define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
-#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode 
 static bool use_rdma_path = false;
 static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
 
@@ -72,14 +71,9 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
         rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
-        std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
-    } else if (path == "staging_path") {
-        *path_ptr = qpl_path_hardware;
-        use_rdma_path = true;
-        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
-        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
+        std::cout << "The test will be run on the RDMA remote path (Zero-Copy)." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, or rdma_path." << std::endl;
         return 1;
     }
 
@@ -162,7 +156,10 @@ int iaa_crc64(std::string src_data_file_path, std::string dest_data_file_path, q
     // Force all pages to be faulted in before RDMA operations
     // This ensures the file data is actually in physical memory
     if (use_rdma_path) {
-        std::cout << "Prefaulting all pages..." << std::flush;
+        std::cout << "Prefaulting all pages and registering..." << std::flush;
+        // Register buffer
+        qpl_rdma_register_buffer(whole_src_vector.data(), src_file_size);
+        
         volatile uint8_t sum = 0;
         const size_t page_size = 4096;
         for (size_t i = 0; i < src_file_size; i += page_size) {
@@ -288,6 +285,10 @@ int iaa_crc64(std::string src_data_file_path, std::string dest_data_file_path, q
 
     // Closing source file
     // src_file.close();
+
+    if (use_rdma_path) {
+        qpl_rdma_unregister_buffer(whole_src_vector.data());
+    }
 
     auto whole_end = std::chrono::steady_clock::now();
 

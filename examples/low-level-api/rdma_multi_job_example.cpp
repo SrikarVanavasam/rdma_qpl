@@ -19,7 +19,6 @@
 
 // Magic NUMA IDs for Remote RDMA
 #define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
-#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode
 
 constexpr const uint64_t poly = 0x04C11DB700000000;
 
@@ -42,20 +41,13 @@ auto main(int argc, char** argv) -> int {
 
     const uint32_t source_size = (argc > 3) ? std::atoi(argv[3]) : 1000;
     
-    // Check for staging mode flag
-    bool use_staging = false;
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--staging" || std::string(argv[i]) == "-s") {
-            use_staging = true;
-        }
-    }
-    int rdma_numa_id = use_staging ? QPL_RDMA_STAGING_NUMA_ID : QPL_RDMA_REMOTE_NUMA_ID;
+    int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
 
     std::cout << "Intel(R) Query Processing Library - Multi-Job RDMA CRC64 Test\n";
     std::cout << "Server IP: " << argv[1] << "\n";
     std::cout << "Number of jobs: " << num_jobs << "\n";
     std::cout << "Source size per job: " << source_size << " bytes\n";
-    std::cout << "Mode: " << (use_staging ? "STAGING (explicit MR)" : "ODP (on-demand paging)") << "\n";
+    std::cout << "Mode: RDMA Zero-Copy\n";
 
     qpl_path_t execution_path = qpl_path_hardware;
 
@@ -87,6 +79,12 @@ auto main(int argc, char** argv) -> int {
         }
     }
     (void)sum;
+
+    // Register buffers for Zero-Copy
+    for (int i = 0; i < num_jobs; ++i) {
+        if (qpl_rdma_register_buffer(sources[i].data(), source_size) != QPL_STS_OK) return 1;
+    }
+    std::cout << "Registered source buffers.\n";
 
     // Create job structures
     std::vector<std::unique_ptr<uint8_t[]>> job_buffers(num_jobs);
@@ -141,6 +139,7 @@ auto main(int argc, char** argv) -> int {
             std::cout << "An error " << status << " acquired during job " << i << " finalization.\n";
             return 1;
         }
+        qpl_rdma_unregister_buffer(sources[i].data());
     }
 
     std::cout << "\nAll " << num_jobs << " jobs completed successfully!\n";

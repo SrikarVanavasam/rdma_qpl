@@ -21,6 +21,9 @@ add_subdirectory(c_api)
 #   RDMA Server (new)
 add_subdirectory(rdma_server)
 
+#   SNIC Agent (builds on ARM)
+add_subdirectory(snic_agent)
+
 # Build and install the resulting library
 get_property(LIB_DEPS GLOBAL PROPERTY QPL_LIB_DEPS)
 
@@ -30,8 +33,18 @@ else ()
     add_library(qpl STATIC ${LIB_DEPS})
 endif()
 
-target_include_directories(qpl
-        PUBLIC $<BUILD_INTERFACE:${QPL_PROJECT_DIR}/include/> $<INSTALL_INTERFACE:include>)
+# Link UCT libraries (Publicly, so consumers link them too)
+find_library(UCT_LIB uct)
+find_library(UCS_LIB ucs)
+if(UCT_LIB AND UCS_LIB)
+    target_link_libraries(qpl PUBLIC ${UCT_LIB} ${UCS_LIB})
+endif()
+
+target_include_directories(qpl PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+    $<INSTALL_INTERFACE:include>
+)
 
 if (DYNAMIC_LOADING_LIBACCEL_CONFIG)
     target_link_libraries(qpl PRIVATE ${CMAKE_DL_LIBS})

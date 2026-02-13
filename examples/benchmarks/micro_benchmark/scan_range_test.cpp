@@ -12,7 +12,6 @@
 
 // Magic NUMA IDs for Remote RDMA
 #define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
-#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode
 static bool use_rdma_path = false;
 static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
 
@@ -34,17 +33,7 @@ static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
  * If you want to put data larger than 2MB, you have to split the data into 2MB chunks.
  */
 std::size_t chunk_size = 2097152;
-// const std::size_t chunk_size = 1048576;
-// const std::size_t chunk_size = 524288;
-// const std::size_t chunk_size = 262144;
-// const std::size_t chunk_size = 131072;
-// const std::size_t chunk_size = 65536;
-// const std::size_t chunk_size = 32768;
-// const std::size_t chunk_size = 16384;
-// const std::size_t chunk_size = 8192;
-// const std::size_t chunk_size = 4096;
-// const std::size_t chunk_size = 2048;
-// const std::size_t chunk_size = 1024;
+
 constexpr const uint32_t input_vector_width     = 8;
 constexpr const uint32_t lower_boundary         = 65; //'A'
 constexpr const uint32_t upper_boundary         = 66; //'B'
@@ -74,14 +63,9 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
         rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
-        std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
-    } else if (path == "staging_path") {
-        *path_ptr = qpl_path_hardware;
-        use_rdma_path = true;
-        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
-        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
+        std::cout << "The test will be run on the RDMA remote path (Zero-Copy)." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, or rdma_path." << std::endl;
         return 1;
     }
 
@@ -116,6 +100,13 @@ int do_warmup_job(qpl_path_t execution_path) {
     }
     
     std::vector<uint8_t> warmup_data(1024, 0xAA);
+    
+    if (use_rdma_path) {
+        if (qpl_rdma_register_buffer(warmup_data.data(), warmup_data.size()) != QPL_STS_OK) {
+             std::cout << "Warmup registration failed" << std::endl;
+             return QPL_STS_LIBRARY_INTERNAL_ERR;
+        }
+    }
     job->op           = qpl_op_crc64;
     job->next_in_ptr  = warmup_data.data();
     job->available_in = static_cast<uint32_t>(warmup_data.size());
@@ -123,6 +114,10 @@ int do_warmup_job(qpl_path_t execution_path) {
     
     status = qpl_execute_job(job);
     qpl_fini_job(job);
+    
+    if (use_rdma_path) {
+        qpl_rdma_unregister_buffer(warmup_data.data());
+    }
     
     if (status != QPL_STS_OK) {
         std::cout << "Failed (" << status << ")" << std::endl;
@@ -200,6 +195,17 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
 
     // Closing source file
     src_file.close();
+    
+    if (use_rdma_path) {
+        // Register the source buffer
+        qpl_rdma_register_buffer(whole_src_vector.data(), src_file_size);
+        
+        // Pre-allocate and register destination buffers
+        for (int i = 0; i < queue_size; ++i) {
+            dest_vector[i].resize(chunk_size);
+            qpl_rdma_register_buffer(dest_vector[i].data(), chunk_size);
+        }
+    }
     std::size_t current_idx = 0;
     std::chrono::duration<int64_t, std::nano> whole_elapsed_time_ns = std::chrono::nanoseconds::zero();
 
@@ -223,7 +229,9 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
              * The reason what it does like this is that maximum size of the destination buffer also has 2MB limitation. If you want to use 2MB source
              * buffer, you have to set the detination buffer size to 8MB but it is not possible.
             */
-            dest_vector[i].resize(vector_size);
+            if (!use_rdma_path) {
+                dest_vector[i].resize(vector_size);
+            }
             // Loading data from source file to source vector
             // src_file.read(reinterpret_cast<char *>(&src_vector[i].front()), vector_size);
 
@@ -308,6 +316,13 @@ int iaa_scan_range(std::string src_data_file_path, std::string dest_data_file_pa
     auto whole_end = std::chrono::steady_clock::now();
 
     whole_elapsed_time_ns += whole_end - whole_start;
+    
+    if (use_rdma_path) {
+        qpl_rdma_unregister_buffer(whole_src_vector.data());
+        for (int i = 0; i < queue_size; ++i) {
+             qpl_rdma_unregister_buffer(dest_vector[i].data());
+        }
+    }
 
     // Freeing resources
     for (int i = 0; i < queue_size; ++i) {

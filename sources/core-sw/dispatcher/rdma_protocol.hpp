@@ -14,6 +14,7 @@ constexpr uint32_t DESC_SIZE = 64; // Size of IAA descriptor
 constexpr uint32_t MAX_WQS = 8;    // Maximum number of WQs supported
 constexpr int32_t QPL_RDMA_REMOTE_NUMA_ID = -100;  // ODP mode (On-Demand Paging)
 constexpr int32_t QPL_RDMA_STAGING_NUMA_ID = -101; // Staging buffer mode (explicit MR)
+constexpr int32_t QPL_SNIC_AGENT_NUMA_ID = -102;   // SNIC agent mode (task chain offload)
 
 // We assume a fixed stride per job for simplicity in this prototype.
 // Job 'i' uses:

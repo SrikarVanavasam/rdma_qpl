@@ -42,6 +42,14 @@ auto main(int argc, char** argv) -> int {
     // Filling source containers
     std::iota(std::begin(source), std::end(source), 0);
 
+    // *** NEW: Register Source Buffer for Zero-Copy Read ***
+    qpl_status reg_status = qpl_rdma_register_buffer(source.data(), source_size);
+    if (reg_status != QPL_STS_OK) {
+        std::cout << "Failed to register buffer: " << reg_status << "\n";
+        return 1;
+    }
+    std::cout << "Registered source buffer for Zero-Copy RDMA.\n";
+
     // Job initialization
     qpl_status status = qpl_get_job_size(execution_path, &size);
     if (status != QPL_STS_OK) {

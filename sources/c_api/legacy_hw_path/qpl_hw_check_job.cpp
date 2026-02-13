@@ -408,41 +408,21 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         }
 
         auto& client      = *rdma_client_instance;
-        bool  use_staging = (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID);
 
         int      slot_id          = state_ptr->rdma_slot_id;
         uint64_t remote_comp_addr = client.get_remote_comp_addr(slot_id);
 
-        if (use_staging) {
-            // Staging mode: check local staging buffer directly
-            auto* comp_stg = reinterpret_cast<hw_completion_record*>(client.get_comp_staging(slot_id));
-            if (!comp_stg) {
-                std::cerr << "[QPL] Failed to get comp staging buffer." << std::endl;
-                return QPL_STS_LIBRARY_INTERNAL_ERR;
+        // Only issue read if we don't have a valid completion status yet
+        if (comp_ptr->status == 0) {
+            ucs_status_t status = client.read_async(slot_id, comp_ptr, sizeof(*comp_ptr), remote_comp_addr, client.get_remote_comp_rkey());
+            if (status == UCS_INPROGRESS) return QPL_STS_BEING_PROCESSED;
+            if (status != UCS_OK) {
+                std::cerr << "[QPL] Failed RDMA read (async) for completion record: " << ucs_status_string(status) << std::endl;
+                return QPL_STS_LIBRARY_INTERNAL_ERR; 
             }
-
-            // Check status directly in staging
-            if (comp_stg->status == 0) {
-                // Not ready locally, sync completions up to max active slot
-                int max_slot = client.get_max_active_slot();
-                if (!client.sync_completions(max_slot + 1)) {
-                    std::cerr << "[QPL] Failed to sync completions." << std::endl;
-                    return QPL_STS_LIBRARY_INTERNAL_ERR;
-                }
-                // Still not ready after sync?
-                if (comp_stg->status == 0) { return QPL_STS_BEING_PROCESSED; }
-            }
-            // Copy final result to QPL's internal comp_ptr
-            std::memcpy(comp_ptr, comp_stg, sizeof(*comp_ptr));
-        } else {
-            // ODP mode: read directly into user buffer
-            if (!client.rdma_read(comp_ptr, sizeof(*comp_ptr), remote_comp_addr, client.get_remote_comp_rkey())) {
-                std::cerr << "[QPL] Failed RDMA read for remote completion record." << std::endl;
-                return QPL_STS_LIBRARY_INTERNAL_ERR;
-            }
+            // If completed immediately or polled successfully, check status
+            if (comp_ptr->status == 0) { return QPL_STS_BEING_PROCESSED; }
         }
-
-        if (comp_ptr->status == 0) { return QPL_STS_BEING_PROCESSED; }
 
         uint32_t output_size   = comp_ptr->output_size;
         bool     is_stats_pass = (qpl_job_ptr->op == qpl_op_compress) && (ADCF_STATS_MODE & desc_ptr->decomp_flags);
@@ -456,40 +436,21 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
             }
             uint64_t remote_dst_addr = client.get_remote_data_block_addr(slot_id, 2);
 
-            if (use_staging) {
-                // Staging mode: read into staging buffer (dst is at block 2), then copy to user
-                uint8_t* dst_stg = static_cast<uint8_t*>(client.get_data_staging(slot_id)) + 2 * qpl::rdma::BLOCK_SIZE;
-                if (!client.rdma_read_with_lkey(dst_stg, copy_size, remote_dst_addr,
-                                                client.get_remote_data_block_rkey(), client.get_data_staging_lkey())) {
-                    std::cerr << "[QPL] Failed RDMA read for remote output data (staging)." << std::endl;
-                    return QPL_STS_LIBRARY_INTERNAL_ERR;
-                }
-                std::memcpy(qpl_job_ptr->next_out_ptr, dst_stg, copy_size);
-            } else {
-                // ODP mode
-                if (!client.rdma_read(qpl_job_ptr->next_out_ptr, copy_size, remote_dst_addr,
-                                      client.get_remote_data_block_rkey())) {
-                    std::cerr << "[QPL] Failed RDMA read for remote output data." << std::endl;
-                    return QPL_STS_LIBRARY_INTERNAL_ERR;
-                }
+            // Async Read
+            ucs_status_t status = client.read_async(slot_id, qpl_job_ptr->next_out_ptr, copy_size, remote_dst_addr, client.get_remote_data_block_rkey());
+            if (status == UCS_INPROGRESS) return QPL_STS_BEING_PROCESSED;
+            if (status != UCS_OK) {
+                 std::cerr << "[QPL] Failed RDMA read (async) for output: " << ucs_status_string(status) << std::endl;
+                 return QPL_STS_LIBRARY_INTERNAL_ERR;
             }
         } else if (is_stats_pass && output_size > 0 && desc_ptr->dst_ptr) {
             uint64_t remote_dst_addr = client.get_remote_data_block_addr(slot_id, 2);
-
-            if (use_staging) {
-                uint8_t* dst_stg = static_cast<uint8_t*>(client.get_data_staging(slot_id)) + 2 * qpl::rdma::BLOCK_SIZE;
-                if (!client.rdma_read_with_lkey(dst_stg, output_size, remote_dst_addr,
-                                                client.get_remote_data_block_rkey(), client.get_data_staging_lkey())) {
-                    std::cerr << "[QPL] Failed RDMA read for remote histogram (staging)." << std::endl;
-                    return QPL_STS_LIBRARY_INTERNAL_ERR;
-                }
-                std::memcpy(const_cast<uint8_t*>(desc_ptr->dst_ptr), dst_stg, output_size);
-            } else {
-                if (!client.rdma_read(const_cast<uint8_t*>(desc_ptr->dst_ptr), output_size, remote_dst_addr,
-                                      client.get_remote_data_block_rkey())) {
-                    std::cerr << "[QPL] Failed RDMA read for remote histogram after stats pass." << std::endl;
-                    return QPL_STS_LIBRARY_INTERNAL_ERR;
-                }
+            
+             ucs_status_t status = client.read_async(slot_id, const_cast<uint8_t*>(desc_ptr->dst_ptr), output_size, remote_dst_addr, client.get_remote_data_block_rkey());
+            if (status == UCS_INPROGRESS) return QPL_STS_BEING_PROCESSED;
+            if (status != UCS_OK) {
+                 std::cerr << "[QPL] Failed RDMA read (async) for histogram: " << ucs_status_string(status) << std::endl;
+                 return QPL_STS_LIBRARY_INTERNAL_ERR;
             }
         }
     }

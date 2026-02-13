@@ -44,6 +44,12 @@ auto main(int argc, char** argv) -> int {
 
     // Initialize source data loop removed to match original example (highly compressible)
 
+    // *** NEW: Register Buffers for Zero-Copy RDMA ***
+    if (qpl_rdma_register_buffer(source.data(), source_size) != QPL_STS_OK) return 1;
+    if (qpl_rdma_register_buffer(destination.data(), compression_size) != QPL_STS_OK) return 1;
+    if (qpl_rdma_register_buffer(reference.data(), source_size) != QPL_STS_OK) return 1;
+    std::cout << "Registered buffers for Zero-Copy RDMA.\n";
+
     std::unique_ptr<uint8_t[]> job_buffer;
     uint32_t                   size = 0;
 
@@ -134,9 +140,12 @@ auto main(int argc, char** argv) -> int {
         }
     }
 
-    std::cout << "Content was successfully compressed and decompressed.\n";
     std::cout << "Input size: " << source.size() << ", compressed size: " << compressed_size
               << ", compression ratio: " << (float)source.size() / (float)compressed_size << ".\n";
+
+    qpl_rdma_unregister_buffer(source.data());
+    qpl_rdma_unregister_buffer(destination.data());
+    qpl_rdma_unregister_buffer(reference.data());
 
     return 0;
 }

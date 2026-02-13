@@ -15,6 +15,7 @@
 
 #include "job.hpp"
 #include "own_defs.h"
+#include "rdma_client.hpp"
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,6 +106,31 @@ QPL_FUN(qpl_status, qpl_get_execution_record,
         default: return QPL_STS_INVALID_PARAM_ERR;
     }
 
+    return QPL_STS_OK;
+}
+
+/**
+ * @brief Register a memory buffer for RDMA Zero-Copy access.
+ */
+QPL_FUN(qpl_status, qpl_rdma_register_buffer, (void* buffer_ptr, size_t buffer_size)) {
+    if (buffer_ptr == nullptr || buffer_size == 0) return QPL_STS_NULL_PTR_ERR;
+    
+    static auto& client = qpl::ml::dispatcher::RdmaClient::get_instance();
+    if (client.register_buffer(buffer_ptr, buffer_size)) {
+        return QPL_STS_OK;
+    } else {
+        return QPL_STS_LIBRARY_INTERNAL_ERR; 
+    }
+}
+
+/**
+ * @brief Unregister a previously registered memory buffer.
+ */
+QPL_FUN(qpl_status, qpl_rdma_unregister_buffer, (void* buffer_ptr)) {
+    if (buffer_ptr == nullptr) return QPL_STS_NULL_PTR_ERR;
+
+    static auto& client = qpl::ml::dispatcher::RdmaClient::get_instance();
+    client.unregister_buffer(buffer_ptr);
     return QPL_STS_OK;
 }
 

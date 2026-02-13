@@ -22,3 +22,5 @@ qpl*.rpm
 
 # CMake-generated header file containing version information
 /include/qpl/c_api/project_version.h
+
+examples/benchmarks/data

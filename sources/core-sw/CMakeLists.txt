@@ -133,3 +133,17 @@ target_compile_options(qplcore_sw_dispatcher
 if (CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_link_options(qplcore_sw_dispatcher PRIVATE ${QPL_LINUX_TOOLCHAIN_DYNAMIC_LIBRARY_FLAGS})
 endif ()
+
+# Add UCT transport
+target_sources(qplcore_sw_dispatcher PRIVATE dispatcher/uct_transport.cpp)
+
+# Link UCX libraries (UCT, UCS)
+find_library(UCT_LIB uct)
+find_library(UCS_LIB ucs)
+
+if(UCT_LIB AND UCS_LIB)
+    target_link_libraries(qplcore_sw_dispatcher PUBLIC ${UCT_LIB} ${UCS_LIB})
+    message(STATUS "Found UCX libraries for core-sw")
+else()
+    message(FATAL_ERROR "UCX libraries (uct, ucs) required for UCT transport")
+endif()

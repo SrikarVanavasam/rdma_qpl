@@ -108,6 +108,14 @@ int do_warmup_job(qpl_path_t execution_path) {
     
     // Simple 1KB CRC operation for warmup
     std::vector<uint8_t> warmup_data(1024, 0xAA);
+
+    if (use_rdma_path) {
+        if (qpl_rdma_register_buffer(warmup_data.data(), warmup_data.size()) != QPL_STS_OK) {
+             std::cout << "Warmup registration failed" << std::endl;
+             return QPL_STS_LIBRARY_INTERNAL_ERR;
+        }
+    }
+
     job->op           = qpl_op_crc64;
     job->next_in_ptr  = warmup_data.data();
     job->available_in = static_cast<uint32_t>(warmup_data.size());
@@ -115,6 +123,10 @@ int do_warmup_job(qpl_path_t execution_path) {
     
     status = qpl_execute_job(job);
     qpl_fini_job(job);
+    
+    if (use_rdma_path) {
+        qpl_rdma_unregister_buffer(warmup_data.data());
+    }
     
     if (status != QPL_STS_OK) {
         std::cout << "Failed (" << status << ")" << std::endl;
@@ -339,6 +351,13 @@ int iaa_compression(std::string src_data_file_path, std::string dest_data_file_p
     // Closing source file
     src_file.close();
     
+    if (use_rdma_path) {
+        qpl_rdma_unregister_buffer(whole_src_vector.data());
+        for (int i = 0; i < queue_size; ++i) {
+             qpl_rdma_unregister_buffer(dest_vector[i].data());
+        }
+    }
+    
 
     // Freeing resources
     for (int i = 0; i < queue_size; ++i) {
@@ -533,6 +552,13 @@ int iaa_decompression(std::string src_data_file_path, std::string dest_data_file
 
     // Closing destination file
     dest_file.close();
+
+    if (use_rdma_path) {
+        for (int i = 0; i < queue_size; ++i) {
+             qpl_rdma_unregister_buffer(src_vector[i].data());
+             qpl_rdma_unregister_buffer(dest_array[i]);
+        }
+    }
 
     // Freeing resources
     for (int i = 0; i < queue_size; ++i) {

@@ -45,6 +45,11 @@ auto main(int argc, char** argv) -> int {
     std::vector<uint8_t> destination(compression_size, 4);
     std::vector<uint8_t> reference(source_size, 7);
 
+    // Register buffers for Zero-Copy
+    if (qpl_rdma_register_buffer(source.data(), source_size) != QPL_STS_OK) return 1;
+    if (qpl_rdma_register_buffer(destination.data(), compression_size) != QPL_STS_OK) return 1;
+    if (qpl_rdma_register_buffer(reference.data(), source_size) != QPL_STS_OK) return 1;
+
     std::unique_ptr<uint8_t[]> job_buffer;
     uint32_t                   size = 0;
     qpl_histogram              deflate_histogram {};
@@ -174,6 +179,10 @@ auto main(int argc, char** argv) -> int {
     std::cout << "Content was successfully compressed and decompressed.\n";
     std::cout << "Input size: " << source_size << ", compressed size: " << compressed_size
               << ", compression ratio: " << (float)source_size / (float)compressed_size << ".\n";
+
+    qpl_rdma_unregister_buffer(source.data());
+    qpl_rdma_unregister_buffer(destination.data());
+    qpl_rdma_unregister_buffer(reference.data());
 
     return 0;
 }

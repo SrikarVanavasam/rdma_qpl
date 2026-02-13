@@ -44,6 +44,32 @@ QPL_API(uint32_t, qpl_get_safe_deflate_compression_buffer_size, (uint32_t source
 
 /** @} */
 
+/**
+ * @defgroup RDMA_API RDMA API
+ * @{
+ */
+
+/**
+ * @brief Register a memory buffer for RDMA Zero-Copy access.
+ *
+ * @param[in]  buffer_ptr   Pointer to the start of the buffer.
+ * @param[in]  buffer_size  Size of the buffer in bytes.
+ *
+ * @return QPL_STS_OK on success, or error code on failure.
+ */
+QPL_API(qpl_status, qpl_rdma_register_buffer, (void* buffer_ptr, size_t buffer_size));
+
+/**
+ * @brief Unregister a previously registered memory buffer.
+ *
+ * @param[in]  buffer_ptr   Pointer to the start of the buffer.
+ *
+ * @return QPL_STS_OK on success.
+ */
+QPL_API(qpl_status, qpl_rdma_unregister_buffer, (void* buffer_ptr));
+
+/** @} */
+
 #ifdef __cplusplus
 }
 #endif

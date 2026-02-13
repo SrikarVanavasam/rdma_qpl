@@ -102,9 +102,7 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
         if (!rdma_client_initialized) {
             if (const char* env_ip = std::getenv("QPL_RDMA_SERVER_IP")) {
                 rdma_client_instance = &qpl::ml::dispatcher::RdmaClient::get_instance();
-                // Enable ODP MR only for ODP mode (-100), not for staging mode (-101)
-                bool enable_odp = (user_specified_numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID);
-                if (!rdma_client_instance->initialize(env_ip, enable_odp)) {
+                if (!rdma_client_instance->initialize(env_ip)) {
                     std::cerr << "[QPL] Failed to initialize RDMA client to " << env_ip << std::endl;
                     return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
                 }
@@ -125,9 +123,6 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
         auto* state_ptr = reinterpret_cast<qpl_hw_state*>(
             reinterpret_cast<char*>(comp_local) - offsetof(qpl_hw_state, comp_ptr));
 
-        // Determine mode: staging (explicit MR) or ODP
-        bool use_staging = (user_specified_numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID);
-
         int slot_id = state_ptr->rdma_slot_id;
         bool reusing_slot = (slot_id >= 0);
 
@@ -143,99 +138,69 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
             state_ptr->rdma_synced_dst = nullptr;
         }
 
-        if (use_staging) {
-            // --- STAGING MODE: Copy to staging buffers, use explicit lkeys ---
-            void* data_stg = client.get_data_staging(slot_id);
-            void* desc_stg = client.get_desc_staging(slot_id);
-            void* comp_stg = client.get_comp_staging(slot_id);
-            
-            if (!data_stg || !desc_stg || !comp_stg) {
-                if (!reusing_slot) { client.release_job_slot(slot_id); state_ptr->rdma_slot_id = -1; }
-                return HW_ACCELERATOR_WQ_IS_BUSY;
-            }
-
-            // Copy source data to staging (always send - content can change even with same pointer)
-            if (desc->src1_ptr && desc->src1_size > 0) {
-                std::memcpy(data_stg, desc->src1_ptr, desc->src1_size);
-                uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
-                client.prepare_write_with_lkey(data_stg, desc->src1_size, remote_src1, 
-                                                client.get_remote_data_block_rkey(), 
-                                                client.get_data_staging_lkey(), false);
-            }
-
-            // Copy src2 (AECS/Huffman tables for compression) to staging
-            if (desc->src2_ptr && desc->src2_size > 0) {
-                // src2 goes to block 1 in remote data area
-                uint8_t* src2_stg = static_cast<uint8_t*>(data_stg) + qpl::rdma::BLOCK_SIZE;
-                std::memcpy(src2_stg, desc->src2_ptr, desc->src2_size);
-                uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
-                client.prepare_write_with_lkey(src2_stg, desc->src2_size, remote_src2, 
-                                                client.get_remote_data_block_rkey(), 
-                                                client.get_data_staging_lkey(), false);
-            }
-
-            // Copy descriptor to staging
-            std::memcpy(desc_stg, desc_ptr, 64);
-            auto* remote_desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(desc_stg);
-            if (desc->src1_ptr)
-                remote_desc->src1_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 0));
-            if (desc->src2_ptr)
-                remote_desc->src2_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 1));
-            if (desc->dst_ptr)
-                remote_desc->dst_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 2));
-            remote_desc->completion_record_ptr = reinterpret_cast<uint8_t*>(client.get_remote_comp_addr(slot_id));
-
-            // Zero out staging completion record before sending
-            std::memset(comp_stg, 0, 64);
-            client.prepare_write_with_lkey(comp_stg, 64, client.get_remote_comp_addr(slot_id),
-                                            client.get_remote_comp_rkey(),
-                                            client.get_comp_staging_lkey(), false);
-            
-            // Send descriptor to portal (round-robin across WQs)
-            uint32_t wq_idx = client.get_next_wq_index();
-            client.prepare_write_with_lkey(desc_stg, 64, client.get_remote_portal_addr(wq_idx),
-                                            client.get_remote_portal_rkey(wq_idx),
-                                            client.get_desc_staging_lkey(), true);
-        } else {
-            // --- ODP MODE: Use original buffers with ODP lkey ---
-            if (desc->src1_ptr && desc->src1_size > 0) {
-                uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
-                client.prepare_write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
-            }
-
-            if (desc->src2_ptr && desc->src2_size > 0) {
-                uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
-                client.prepare_write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
-            }
-
-            uint8_t* persistent_desc_buf = client.get_local_desc_buffer(slot_id);
-            if (!persistent_desc_buf) {
-                if (!reusing_slot) { client.release_job_slot(slot_id); state_ptr->rdma_slot_id = -1; }
-                return HW_ACCELERATOR_WQ_IS_BUSY;
-            }
-            std::memcpy(persistent_desc_buf, desc_ptr, 64);
-
-            auto* remote_desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(persistent_desc_buf);
-            if (desc->src1_ptr)
-                remote_desc->src1_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 0));
-            if (desc->src2_ptr)
-                remote_desc->src2_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 1));
-            if (desc->dst_ptr)
-                remote_desc->dst_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 2));
-            remote_desc->completion_record_ptr = reinterpret_cast<uint8_t*>(client.get_remote_comp_addr(slot_id));
-
-            static uint8_t zero_comp[64] = {0};
-            client.prepare_write(zero_comp, 64, client.get_remote_comp_addr(slot_id), client.get_remote_comp_rkey(), false);
-            
-            // Send descriptor to portal (round-robin across WQs)
-            uint32_t wq_idx = client.get_next_wq_index();
-            client.prepare_write(persistent_desc_buf, 64, client.get_remote_portal_addr(wq_idx), client.get_remote_portal_rkey(wq_idx), true);
-        }
-
-        if (!client.commit_batch()) {
-            std::cerr << "[QPL] Failed to commit RDMA batch." << std::endl;
+        // --- STAGING MODE (Unified) ---
+        void* data_stg = client.get_data_staging(slot_id);
+        // desc_stg and comp_stg no longer needed for short writes
+        
+        if (!data_stg) {
             if (!reusing_slot) { client.release_job_slot(slot_id); state_ptr->rdma_slot_id = -1; }
             return HW_ACCELERATOR_WQ_IS_BUSY;
+        }
+
+        // Copy source data to staging (always send - content can change even with same pointer)
+        if (desc->src1_ptr && desc->src1_size > 0) {
+            uint64_t remote_src1 = client.get_remote_data_block_addr(slot_id, 0);
+            
+            if (client.is_registered(desc->src1_ptr, desc->src1_size)) {
+                // Zero-Copy Path: Send directly from User Buffer to Server Staging
+                client.write(desc->src1_ptr, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
+            } else {
+                // Staging Path: Copy to Bounce Buffer -> Send
+                std::memcpy(data_stg, desc->src1_ptr, desc->src1_size);
+                client.write(data_stg, desc->src1_size, remote_src1, client.get_remote_data_block_rkey(), false);
+            }
+        }
+
+        // Copy src2 (AECS/Huffman tables for compression) to staging
+        if (desc->src2_ptr && desc->src2_size > 0) {
+            // src2 goes to block 1 in remote data area
+            uint64_t remote_src2 = client.get_remote_data_block_addr(slot_id, 1);
+            
+            if (client.is_registered(desc->src2_ptr, desc->src2_size)) {
+                 client.write(desc->src2_ptr, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
+            } else {
+                 uint8_t* src2_stg = static_cast<uint8_t*>(data_stg) + qpl::rdma::BLOCK_SIZE;
+                 std::memcpy(src2_stg, desc->src2_ptr, desc->src2_size);
+                 client.write(src2_stg, desc->src2_size, remote_src2, client.get_remote_data_block_rkey(), false);
+            }
+        }
+
+        // Prepare descriptor on stack for inline send
+        alignas(64) uint8_t desc_buf[64];
+        std::memcpy(desc_buf, desc_ptr, 64);
+        auto* remote_desc = reinterpret_cast<hw_decompress_analytics_descriptor*>(desc_buf);
+        
+        if (desc->src1_ptr)
+            remote_desc->src1_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 0));
+        if (desc->src2_ptr)
+            remote_desc->src2_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 1));
+        if (desc->dst_ptr)
+            remote_desc->dst_ptr = reinterpret_cast<uint8_t*>(client.get_remote_data_block_addr(slot_id, 2));
+        remote_desc->completion_record_ptr = reinterpret_cast<uint8_t*>(client.get_remote_comp_addr(slot_id));
+
+        // Zero out remote completion record using inline write
+        uint8_t zero_comp[64] = {0};
+        if (!client.write_short(zero_comp, 64, client.get_remote_comp_addr(slot_id), client.get_remote_comp_rkey())) {
+             std::cerr << "[Enqueue] Failed to zero completion record!" << std::endl;
+             return HW_ACCELERATOR_WQ_IS_BUSY;
+        }
+        
+        // Send descriptor to portal (round-robin across WQs) using inline write
+        uint32_t wq_idx = client.get_next_wq_index();
+        if (!client.write_short(desc_buf, 64, client.get_remote_portal_addr(wq_idx), client.get_remote_portal_rkey(wq_idx))) {
+             std::cerr << "[Enqueue] Failed to submit descriptor (write_short)!" << std::endl;
+             // Should we retry or fail? Fail for now.
+             return HW_ACCELERATOR_WQ_IS_BUSY;
         }
 
         return HW_ACCELERATOR_STATUS_OK;

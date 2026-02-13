@@ -12,7 +12,6 @@
 
 // Magic NUMA IDs for Remote RDMA
 #define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
-#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode
 static bool use_rdma_path = false;
 static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
 
@@ -73,14 +72,9 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
         rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
-        std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
-    } else if (path == "staging_path") {
-        *path_ptr = qpl_path_hardware;
-        use_rdma_path = true;
-        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
-        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
+        std::cout << "The test will be run on the RDMA remote path (Zero-Copy)." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, or rdma_path." << std::endl;
         return 1;
     }
 
@@ -115,6 +109,14 @@ int do_warmup_job(qpl_path_t execution_path) {
     }
     
     std::vector<uint8_t> warmup_data(1024, 0xAA);
+    
+    if (use_rdma_path) {
+        if (qpl_rdma_register_buffer(warmup_data.data(), warmup_data.size()) != QPL_STS_OK) {
+             std::cout << "Warmup registration failed" << std::endl;
+             return QPL_STS_LIBRARY_INTERNAL_ERR;
+        }
+    }
+    
     job->op           = qpl_op_crc64;
     job->next_in_ptr  = warmup_data.data();
     job->available_in = static_cast<uint32_t>(warmup_data.size());
@@ -122,6 +124,10 @@ int do_warmup_job(qpl_path_t execution_path) {
     
     status = qpl_execute_job(job);
     qpl_fini_job(job);
+    
+    if (use_rdma_path) {
+        qpl_rdma_unregister_buffer(warmup_data.data());
+    }
     
     if (status != QPL_STS_OK) {
         std::cout << "Failed (" << status << ")" << std::endl;
@@ -198,6 +204,18 @@ int iaa_scan(std::string src_data_file_path, std::string dest_data_file_path, qp
 
     // Closing source file
     src_file.close();
+    
+    if (use_rdma_path) {
+        // Register the source buffer
+        qpl_rdma_register_buffer(whole_src_vector.data(), src_file_size);
+        
+        // Pre-allocate and register destination buffers
+        for (int i = 0; i < queue_size; ++i) {
+            dest_vector[i].resize(chunk_size);
+            qpl_rdma_register_buffer(dest_vector[i].data(), chunk_size);
+        }
+    }
+
     std::size_t current_idx = 0;
 
     std::chrono::duration<int64_t, std::nano> whole_elapsed_time_ns = std::chrono::nanoseconds::zero();
@@ -221,8 +239,15 @@ int iaa_scan(std::string src_data_file_path, std::string dest_data_file_path, qp
              * The reason what it does like this is that maximum size of the destination buffer also has 2MB limitation. If you want to use 2MB source
              * buffer, you have to set the detination buffer size to 8MB but it is not possible.
             */
-            dest_vector[i].resize(vector_size);
-
+            if (!use_rdma_path) {
+                // Only resize if NOT using RDMA (since we pre-allocated for RDMA)
+                // Or we can just leave it pre-allocated.
+                dest_vector[i].resize(vector_size);
+            }
+            // Note: If using RDMA, we rely on the pre-allocated chunk_size and just limit available_out to vector_size (or keep safe buffer)
+            // But available_out should be based on what HW expects.
+            // Actually, for scan, output is indices.
+            
             // Performing a operation
             job[i]->op                 = qpl_op_scan_eq;
             job[i]->level              = qpl_default_level;
@@ -307,6 +332,13 @@ int iaa_scan(std::string src_data_file_path, std::string dest_data_file_path, qp
     auto whole_end = std::chrono::steady_clock::now();
 
     whole_elapsed_time_ns += whole_end - whole_start;
+    
+    if (use_rdma_path) {
+        qpl_rdma_unregister_buffer(whole_src_vector.data());
+        for (int i = 0; i < queue_size; ++i) {
+             qpl_rdma_unregister_buffer(dest_vector[i].data());
+        }
+    }
 
     // Freeing resources
     for (int i = 0; i < queue_size; ++i) {
