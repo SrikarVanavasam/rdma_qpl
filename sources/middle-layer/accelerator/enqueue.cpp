@@ -94,8 +94,19 @@ extern "C" hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t u
     std::cout << "------------------------------------------" << std::endl;
     END DEBUG */
 
-    if (user_specified_numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID || 
-        user_specified_numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID) {
+    bool is_remote_target = (user_specified_numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID);
+
+    if (user_specified_numa_id == qpl::rdma::QPL_RDMA_HYBRID_NUMA_ID) {
+        static thread_local uint32_t rr_counter = 0;
+        // Round Robin: Odd -> Remote, Even -> Local
+        if ((rr_counter++ % 2) != 0) {
+            is_remote_target = true;
+        } else {
+            user_specified_numa_id = QPL_DEVICE_NUMA_ID_ANY;
+        }
+    }
+
+    if (is_remote_target) {
         static bool                             rdma_client_initialized = false;
         static qpl::ml::dispatcher::RdmaClient* rdma_client_instance    = nullptr;
 

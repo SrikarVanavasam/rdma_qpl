@@ -14,10 +14,9 @@
 
 // Magic NUMA IDs for Remote RDMA
 #define QPL_RDMA_REMOTE_NUMA_ID (-100)  // ODP mode
-#define QPL_RDMA_STAGING_NUMA_ID (-101) // Staging mode
+#define QPL_RDMA_HYBRID_NUMA_ID (-200)  // Hybrid mode
 static bool use_rdma_path = false;
 static int rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID; // Default to ODP mode
-
 
 /**
  * @brief This example requires a command line argument to set the execution path. Valid values are `software_path`
@@ -66,13 +65,13 @@ int parse_execution_path(int argc, char **argv, qpl_path_t *path_ptr, int extra_
         use_rdma_path = true;
         rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
         std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
-    } else if (path == "staging_path") {
+    } else if (path == "hybrid_path") {
         *path_ptr = qpl_path_hardware;
         use_rdma_path = true;
-        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
-        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
+        rdma_numa_id = QPL_RDMA_HYBRID_NUMA_ID;
+        std::cout << "The test will be run on the Hybrid path." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or hybrid_path." << std::endl;
         return 1;
     }
 
@@ -607,13 +606,13 @@ auto main(int argc, char** argv) -> int {
         use_rdma_path = true;
         rdma_numa_id = QPL_RDMA_REMOTE_NUMA_ID;
         std::cout << "The test will be run on the RDMA remote path (ODP mode)." << std::endl;
-    } else if (path == "staging_path") {
+    } else if (path == "hybrid_path") {
         execution_path = qpl_path_hardware;
         use_rdma_path = true;
-        rdma_numa_id = QPL_RDMA_STAGING_NUMA_ID;
-        std::cout << "The test will be run on the RDMA remote path (STAGING mode)." << std::endl;
+        rdma_numa_id = QPL_RDMA_HYBRID_NUMA_ID;
+        std::cout << "The test will be run on the Hybrid path." << std::endl;
     } else {
-        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or staging_path." << std::endl;
+        std::cout << "Unrecognized value for parameter. Use hardware_path, software_path, rdma_path, or hybrid_path." << std::endl;
         return 1;
     }
 

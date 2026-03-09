@@ -391,7 +391,7 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
 
     // --- RDMA INTERCEPTION ---
     if (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID ||
-        qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_STAGING_NUMA_ID) {
+        (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_HYBRID_NUMA_ID && state_ptr->rdma_slot_id >= 0)) {
         static qpl::ml::dispatcher::RdmaClient* rdma_client_instance = nullptr;
 
         if (!rdma_client_instance || !rdma_client_instance->is_initialized()) {
