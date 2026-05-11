@@ -54,14 +54,16 @@ extern "C" qpl_status hw_descriptor_compress_init_deflate_base(qpl_job*         
 
 #if defined(__linux__)
     static auto& dispatcher = qpl::ml::dispatcher::hw_dispatcher::get_instance();
-    if (!dispatcher.is_hw_support()) {
+    if (qpl_job_ptr->data_ptr.path != qpl_path_pool && !dispatcher.is_hw_support()) {
         const hw_accelerator_status hw_status = dispatcher.get_hw_init_status();
         return qpl::ml::util::convert_hw_accelerator_status_to_qpl_status(hw_status);
     }
 
-    const auto& device            = dispatcher.device(0);
-    is_hw_header_gen_supported    = device.get_header_gen_support();
-    is_hw_dict_compress_supported = device.get_dict_compress_support();
+    if (dispatcher.is_hw_support()) {
+        const auto& device            = dispatcher.device(0);
+        is_hw_header_gen_supported    = device.get_header_gen_support();
+        is_hw_dict_compress_supported = device.get_dict_compress_support();
+    }
 #endif //__linux__
 
     // If dictionary is provided, check that the following are true:
@@ -361,13 +363,15 @@ extern "C" qpl_status hw_descriptor_compress_init_deflate_dynamic(hw_decompress_
 
 #if defined(__linux__)
     static auto& dispatcher = qpl::ml::dispatcher::hw_dispatcher::get_instance();
-    if (!dispatcher.is_hw_support()) {
+    if (qpl_job_ptr->data_ptr.path != qpl_path_pool && !dispatcher.is_hw_support()) {
         const hw_accelerator_status hw_status = dispatcher.get_hw_init_status();
         return qpl::ml::util::convert_hw_accelerator_status_to_qpl_status(hw_status);
     }
 
-    const auto& device         = dispatcher.device(0);
-    is_hw_header_gen_supported = device.get_header_gen_support();
+    if (dispatcher.is_hw_support()) {
+        const auto& device         = dispatcher.device(0);
+        is_hw_header_gen_supported = device.get_header_gen_support();
+    }
 #endif //__linux__
 
     // TODO: enable Huffman only header gen
@@ -442,13 +446,15 @@ extern "C" qpl_status hw_descriptor_compress_init_deflate_canned(qpl_job* const 
 
 #if defined(__linux__)
     static auto& dispatcher = qpl::ml::dispatcher::hw_dispatcher::get_instance();
-    if (!dispatcher.is_hw_support()) {
+    if (job_ptr->data_ptr.path != qpl_path_pool && !dispatcher.is_hw_support()) {
         const hw_accelerator_status hw_status = dispatcher.get_hw_init_status();
         return qpl::ml::util::convert_hw_accelerator_status_to_qpl_status(hw_status);
     }
 
-    const auto& device            = dispatcher.device(0);
-    is_hw_dict_compress_supported = device.get_dict_compress_support();
+    if (dispatcher.is_hw_support()) {
+        const auto& device            = dispatcher.device(0);
+        is_hw_dict_compress_supported = device.get_dict_compress_support();
+    }
 #endif //__linux__
 
     // If dictionary is provided, check that the following are true:

@@ -42,6 +42,7 @@ uint32_t perform_scan(qpl_job* job_ptr, uint8_t* buffer_ptr, uint32_t buffer_siz
     analytics::analytic_operation_result_t scan_result {};
 
     switch (job_ptr->data_ptr.path) {
+        case qpl_path_pool:
         case qpl_path_hardware: {
 
             auto input_stream = analytics::input_stream_t::builder(src_begin, src_end)

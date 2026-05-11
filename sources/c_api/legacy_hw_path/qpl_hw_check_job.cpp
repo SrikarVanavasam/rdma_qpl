@@ -39,6 +39,9 @@
 #include "hw_devices.h"
 #include "rdma_client.hpp"
 #include "rdma_protocol.hpp"
+#include "cxl_client.hpp"
+#include "cxl_protocol.hpp"
+#include <x86intrin.h>
 
 namespace qpl::ml {
 
@@ -282,8 +285,8 @@ qpl_status hw_check_compress_job(qpl_job* qpl_job_ptr) {
     // 6: 2-pass header gen with Deflate header
     // 7: 2-pass header gen with bFinal Deflate header
     const bool hw_2_pass_header_gen = ADCF_ENABLE_HDR_GEN(5U) == (ADCF_ENABLE_HDR_GEN(5U) & desc_ptr->decomp_flags) ||
-                                      ADCF_ENABLE_HDR_GEN(6U) == (ADCF_ENABLE_HDR_GEN(6U) & desc_ptr->decomp_flags) ||
-                                      ADCF_ENABLE_HDR_GEN(7U) == (ADCF_ENABLE_HDR_GEN(7U) & desc_ptr->decomp_flags);
+                                       ADCF_ENABLE_HDR_GEN(6U) == (ADCF_ENABLE_HDR_GEN(6U) & desc_ptr->decomp_flags) ||
+                                       ADCF_ENABLE_HDR_GEN(7U) == (ADCF_ENABLE_HDR_GEN(7U) & desc_ptr->decomp_flags);
 
     /* DEBUG: Resubmission state
     std::cout << "[QPL_HW_CHECK_JOB] Resubmission Check:" << std::endl;
@@ -378,7 +381,11 @@ qpl_status hw_check_compress_job(qpl_job* qpl_job_ptr) {
 
 } // namespace qpl::ml
 
-extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
+extern "C" 
+#if defined(__linux__)
+__attribute__((target("clflushopt,waitpkg")))
+#endif
+qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
     // std::cout << "[QPL_HW_CHECK_JOB] Entering hw_check_job for job " << qpl_job_ptr << " with numa_id "
     //           << qpl_job_ptr->numa_id << " available_out: " << qpl_job_ptr->available_out << std::endl;
     using namespace qpl;
@@ -388,6 +395,72 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
     const auto* desc_ptr = &state_ptr->desc_ptr;
     auto*       comp_ptr = &state_ptr->comp_ptr; // QPL's internal completion record struct
     auto*       cfg_ptr  = GET_DCFG(state_ptr);
+
+    // --- CXL PROXY INTERCEPTION ---
+    if (qpl_job_ptr->numa_id == qpl::cxl::QPL_LOCAL_PROXY_NUMA_ID || 
+        qpl_job_ptr->numa_id == qpl::cxl::QPL_LOCAL_PROXY_UMWAIT_NUMA_ID ||
+        qpl_job_ptr->numa_id == qpl::cxl::QPL_CXL_PROXY_NUMA_ID || 
+        qpl_job_ptr->numa_id == qpl::cxl::QPL_CXL_PROXY_UMWAIT_NUMA_ID ||
+        qpl_job_ptr->numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID) {
+        
+        auto& cxl_client = qpl::ml::dispatcher::CxlClient::get_instance();
+        int slot = state_ptr->rdma_slot_id;
+        
+        if (slot >= 0) {
+            void* slot_ptr = cxl_client.get_comp_ptr(slot);
+            if (slot_ptr) {
+                auto* slot_comp = reinterpret_cast<hw_completion_record*>(slot_ptr);
+                
+                // --- Re-apply path-specific optimizations ---
+                if (qpl_job_ptr->numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID) {
+                    _mm_clflushopt(slot_ptr);
+                    _mm_mfence();
+                } else if (qpl_job_ptr->numa_id == qpl::cxl::QPL_CXL_PROXY_UMWAIT_NUMA_ID ||
+                           qpl_job_ptr->numa_id == qpl::cxl::QPL_LOCAL_PROXY_UMWAIT_NUMA_ID) {
+                    _umonitor((void*)&slot_comp->status);
+                    if (slot_comp->status == 0) {
+                        _umwait(0, __rdtsc() + 10000);
+                    }
+                }
+
+                if (slot_comp->status != 0) {
+                    // Copy result and release slot
+                    std::memcpy(comp_ptr, slot_comp, 64);
+                    cxl_client.release_comp_slot(slot);
+                    state_ptr->rdma_slot_id = -1;
+                } else {
+                    return QPL_STS_BEING_PROCESSED;
+                }
+            }
+        }
+    }
+    // --- RDMA PROXY INTERCEPTION ---
+    // For RDMA, the IAA writes the completion to the server-side completion buffer.
+    // We poll it by issuing an RDMA READ on every check, then inspect the local copy.
+    else if (qpl_job_ptr->numa_id == qpl::cxl::QPL_RDMA_PROXY_NUMA_ID) {
+        auto& cxl_client = qpl::ml::dispatcher::CxlClient::get_instance();
+        int slot = state_ptr->rdma_slot_id;
+
+        if (slot >= 0) {
+            hw_completion_record rdma_comp_staging = {};
+            if (cxl_client.rdma_read_completion(slot, &rdma_comp_staging) != 0) {
+                std::cerr << "[QPL CXL] RDMA READ for completion failed" << std::endl;
+                return QPL_STS_LIBRARY_INTERNAL_ERR;
+            }
+
+            if (rdma_comp_staging.status != 0) {
+                std::memcpy(comp_ptr, &rdma_comp_staging, 64);
+                cxl_client.release_comp_slot(slot);
+                state_ptr->rdma_slot_id = -1;
+            } else {
+                return QPL_STS_BEING_PROCESSED;
+            }
+        }
+    }
+    // --- END CXL/RDMA PROXY INTERCEPTION ---
+
+    (void)desc_ptr;
+    (void)cfg_ptr;
 
     // --- RDMA INTERCEPTION ---
     if (qpl_job_ptr->numa_id == qpl::rdma::QPL_RDMA_REMOTE_NUMA_ID ||
@@ -587,8 +660,8 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         const uint32_t wrSrc2   = (desc_ptr->op_code_op_flags >> 18U) & 3U;
         state_ptr->config_valid = ((AD_WRSRC2_ALWAYS == wrSrc2) ||
                                    ((AD_WRSRC2_MAYBE == wrSrc2) && (AD_STATUS_OUTPUT_OVERFLOW == comp_ptr->status)))
-                                          ? 1U
-                                          : 0U;
+                                           ? 1U
+                                           : 0U;
         FLIP_AECS_OFFSET(state_ptr);
     }
 
@@ -629,8 +702,8 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         if (0U != state_ptr->accumulation_buffer.actual_bytes) {
             core_sw::util::move(
                     state_ptr->accumulation_buffer.data + size,
-                    state_ptr->accumulation_buffer.data + size + state_ptr->accumulation_buffer.actual_bytes,
-                    state_ptr->accumulation_buffer.data);
+                                state_ptr->accumulation_buffer.data + size + state_ptr->accumulation_buffer.actual_bytes,
+                                state_ptr->accumulation_buffer.data);
         }
     } else {
         job::update_input_stream(qpl_job_ptr, size);
@@ -650,7 +723,7 @@ extern "C" qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
     if (0U != qpl_job_ptr->available_in) {
         // This should only happen if buffer > 2GB, or if buffering
         const qpl_status status = hw_submit_decompress_job(qpl_job_ptr, qpl_job_ptr->flags & QPL_FLAG_LAST,
-                                                           qpl_job_ptr->next_in_ptr, qpl_job_ptr->available_in);
+                                                            qpl_job_ptr->next_in_ptr, qpl_job_ptr->available_in);
 
         return (QPL_STS_OK != status) ? status : QPL_STS_BEING_PROCESSED;
     }

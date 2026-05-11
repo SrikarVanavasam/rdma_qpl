@@ -24,5 +24,6 @@
 #include "c_api/job.h"
 #include "c_api/utility.h"
 #include "c_api/version.h"
+#include "c_api/cxl.h"
 
 #endif //QPL_QPL_H

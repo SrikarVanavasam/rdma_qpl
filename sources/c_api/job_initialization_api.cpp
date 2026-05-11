@@ -50,7 +50,7 @@ QPL_FUN(qpl_status, qpl_get_job_size, (qpl_path_t qpl_path, uint32_t* job_size_p
     using namespace qpl;
 
     QPL_BAD_PTR_RET(job_size_ptr);
-    QPL_BADARG_RET(qpl_path_auto > qpl_path || qpl_path_software < qpl_path, QPL_STS_PATH_ERR);
+    QPL_BADARG_RET(qpl_path_auto > qpl_path || qpl_path_pool < qpl_path, QPL_STS_PATH_ERR);
 
     // qpl_job_ptr can have any alignment,
     // therefore need to add additional bytes to be able to align pointers
@@ -62,7 +62,7 @@ QPL_FUN(qpl_status, qpl_get_job_size, (qpl_path_t qpl_path, uint32_t* job_size_p
     *job_size_ptr += QPL_ALIGNED_SIZE(own_get_job_size_analytics(qpl_path), QPL_DEFAULT_ALIGNMENT);
     *job_size_ptr += QPL_ALIGNED_SIZE(own_get_job_size_middle_layer_buffer(qpl_path), QPL_DEFAULT_ALIGNMENT);
 
-    if (qpl_path_hardware == qpl_path || qpl_path_auto == qpl_path) {
+    if (qpl_path_hardware == qpl_path || qpl_path_auto == qpl_path || qpl_path_pool == qpl_path) {
         *job_size_ptr += QPL_ALIGNED_SIZE(hw_get_job_size(), QPL_DEFAULT_ALIGNMENT);
     }
 
@@ -72,7 +72,7 @@ QPL_FUN(qpl_status, qpl_get_job_size, (qpl_path_t qpl_path, uint32_t* job_size_p
 QPL_FUN(qpl_status, qpl_init_job, (qpl_path_t qpl_path, qpl_job* qpl_job_ptr)) {
     using namespace qpl;
 
-    QPL_BADARG_RET(qpl_path_auto > qpl_path || qpl_path_software < qpl_path, QPL_STS_PATH_ERR);
+    QPL_BADARG_RET(qpl_path_auto > qpl_path || qpl_path_pool < qpl_path, QPL_STS_PATH_ERR);
     QPL_BAD_PTR_RET(qpl_job_ptr);
 
     uint32_t       status         = QPL_STS_OK;
@@ -98,7 +98,7 @@ QPL_FUN(qpl_status, qpl_init_job, (qpl_path_t qpl_path, qpl_job* qpl_job_ptr)) {
     qpl_job_ptr->data_ptr.path         = qpl_path;
 
 #ifdef __linux__
-    if (qpl_path_hardware == qpl_path || qpl_path_auto == qpl_path) {
+    if (qpl_path_hardware == qpl_path || qpl_path_auto == qpl_path || qpl_path_pool == qpl_path) {
         qpl_job_ptr->numa_id = -1;
 
         auto* const hw_state_ptr = (qpl_hw_state*)(qpl_job_ptr->data_ptr.hw_state_ptr);
@@ -107,11 +107,14 @@ QPL_FUN(qpl_status, qpl_init_job, (qpl_path_t qpl_path, qpl_job* qpl_job_ptr)) {
         status = hw_accelerator_get_context(&hw_state_ptr->accel_context);
 
         if (HW_ACCELERATOR_STATUS_OK != status) {
-            qpl_job_ptr->data_ptr.path = qpl_path_software;
-            if (qpl_path_hardware == qpl_path) {
-                status = ml::util::convert_hw_accelerator_status_to_qpl_status(status);
-            } else {
+            if (qpl_path_auto == qpl_path) {
+                qpl_job_ptr->data_ptr.path = qpl_path_software;
                 status = QPL_STS_OK;
+            } else if (qpl_path_pool == qpl_path) {
+                // For pool path, we don't care if local HW context initialization failed
+                status = QPL_STS_OK;
+            } else if (qpl_path_hardware == qpl_path) {
+                status = ml::util::convert_hw_accelerator_status_to_qpl_status(status);
             }
         }
     }
@@ -225,7 +228,7 @@ uint32_t own_get_job_size_middle_layer_buffer(qpl_path_t UNREFERENCED_PARAMETER(
         size += std::max(deflate_size, huffman_only_size);
     }
 
-    if (qpl_path_hardware == qpl_path || qpl_path_auto == qpl_path) {
+    if (qpl_path_hardware == qpl_path || qpl_path_auto == qpl_path || qpl_path_pool == qpl_path) {
         uint32_t deflate_size      = 0;
         uint32_t huffman_only_size = 0;
 

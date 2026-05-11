@@ -233,7 +233,8 @@ extern "C" {
 typedef enum {
     qpl_path_auto     = 0x00000000U, /**< Enable auto-detection of the equipment for executing */
     qpl_path_hardware = 0x00000001U, /**< Enable execution by hardware path */
-    qpl_path_software = 0x00000002U  /**< Enable execution by software path (Run on CPU) */
+    qpl_path_software = 0x00000002U, /**< Enable execution by software path (Run on CPU) */
+    qpl_path_pool     = 0x00000003U  /**< Enable execution by pool path (Proxy offloading) */
 } qpl_path_t;
 
 /**

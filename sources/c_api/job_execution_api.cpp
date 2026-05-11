@@ -129,7 +129,7 @@ QPL_FUN("C" qpl_status, qpl_submit_job, (qpl_job * qpl_job_ptr)) {
 
     const qpl_path_t path = qpl_job_ptr->data_ptr.path;
 
-    if ((qpl_path_hardware == path || qpl_path_auto == path)) {
+    if (qpl_path_hardware == path || qpl_path_auto == path || qpl_path_pool == path) {
         auto* state_ptr = reinterpret_cast<qpl_hw_state*>(job::get_state(qpl_job_ptr));
 
         // Reset is_sw_fallback for the first job
@@ -149,7 +149,7 @@ QPL_FUN("C" qpl_status, qpl_submit_job, (qpl_job * qpl_job_ptr)) {
         if (!state_ptr->is_sw_fallback) {
             // check that HW is available
             static auto& dispatcher = ml::dispatcher::hw_dispatcher::get_instance();
-            if (!dispatcher.is_hw_support()) {
+            if (path != qpl_path_pool && !dispatcher.is_hw_support()) {
                 const hw_accelerator_status hw_status = dispatcher.get_hw_init_status();
                 status = ml::util::convert_hw_accelerator_status_to_qpl_status(hw_status);
             }
@@ -166,7 +166,7 @@ QPL_FUN("C" qpl_status, qpl_submit_job, (qpl_job * qpl_job_ptr)) {
              * @warning Disallow falling back to the host execution if failure is not on the
              * first chunk or if QPL_STS_MORE_OUTPUT_NEEDED (output buffer is too small) error happened.
             */
-            if (QPL_STS_OK != status && job::is_sw_fallback_supported(qpl_job_ptr, status)) {
+            if (QPL_STS_OK != status && qpl_path_pool != path && job::is_sw_fallback_supported(qpl_job_ptr, status)) {
                 job::update_is_sw_fallback(qpl_job_ptr, true);
             } else {
                 return status;
@@ -212,7 +212,7 @@ QPL_FUN("C" qpl_status, qpl_check_job, (qpl_job * qpl_job_ptr)) {
     if (QPL_STS_BEING_PROCESSED == status) { return static_cast<qpl_status>(status); }
 
     // Use fallback to qpl_path_software in case if qpl_path_hardware returns an error.
-    if (QPL_STS_OK != status && job::is_sw_fallback_supported(qpl_job_ptr, static_cast<qpl_status>(status))) {
+    if (QPL_STS_OK != status && qpl_job_ptr->data_ptr.path != qpl_path_pool && job::is_sw_fallback_supported(qpl_job_ptr, static_cast<qpl_status>(status))) {
         job::update_is_sw_fallback(qpl_job_ptr, true);
 
         // Execute job on SW path
@@ -254,7 +254,7 @@ QPL_FUN("C" qpl_status, qpl_wait_job, (qpl_job * qpl_job_ptr)) {
     }
 
     // Use fallback to qpl_path_software in case if qpl_path_hardware returns an error.
-    if (QPL_STS_OK != status && job::is_sw_fallback_supported(qpl_job_ptr, static_cast<qpl_status>(status))) {
+    if (QPL_STS_OK != status && qpl_job_ptr->data_ptr.path != qpl_path_pool && job::is_sw_fallback_supported(qpl_job_ptr, static_cast<qpl_status>(status))) {
         job::update_is_sw_fallback(qpl_job_ptr, true);
 
         // Execute job on SW path
@@ -279,7 +279,7 @@ QPL_FUN("C" qpl_status, qpl_execute_job, (qpl_job * qpl_job_ptr)) {
     qpl_status status = QPL_STS_OK;
     qpl_path_t path   = qpl_job_ptr->data_ptr.path;
 
-    if ((qpl_path_hardware == path || qpl_path_auto == path)) {
+    if (qpl_path_hardware == path || qpl_path_auto == path || qpl_path_pool == path) {
         auto* state_ptr = reinterpret_cast<qpl_hw_state*>(job::get_state(qpl_job_ptr));
 
         // Reset is_sw_fallback for the first job
@@ -301,13 +301,22 @@ QPL_FUN("C" qpl_status, qpl_execute_job, (qpl_job * qpl_job_ptr)) {
         if (!state_ptr->is_sw_fallback) {
             // check that HW is available
             static auto& dispatcher = ml::dispatcher::hw_dispatcher::get_instance();
-            if (!dispatcher.is_hw_support()) {
+            if (path != qpl_path_pool && !dispatcher.is_hw_support()) {
                 const hw_accelerator_status hw_status = dispatcher.get_hw_init_status();
                 status = ml::util::convert_hw_accelerator_status_to_qpl_status(hw_status);
             }
 
             if (QPL_STS_OK == status) {
-                if (job::is_extract(qpl_job_ptr)) {
+                if (qpl_job_ptr->numa_id <= -100 && qpl_job_ptr->numa_id >= -107) {
+                    // For RDMA and CXL Proxy paths, we MUST use the async code path
+                    // to ensure hw_check_job is called for correct completion polling.
+                    status = hw_submit_job(qpl_job_ptr);
+
+                    if (QPL_STS_OK == status) {
+                        job::set_job_to_in_progress(qpl_job_ptr);
+                        status = qpl_wait_job(qpl_job_ptr);
+                    }
+                } else if (job::is_extract(qpl_job_ptr)) {
                     status = static_cast<qpl_status>(perform_extract(qpl_job_ptr, analytics_state_ptr->unpack_buf_ptr,
                                                                      analytics_state_ptr->unpack_buf_size));
                 } else if (job::is_scan(qpl_job_ptr)) {
@@ -341,7 +350,7 @@ QPL_FUN("C" qpl_status, qpl_execute_job, (qpl_job * qpl_job_ptr)) {
             }
 
             // Use fallback to qpl_path_software in case if qpl_path_hardware returns an error.
-            if (QPL_STS_OK != status && job::is_sw_fallback_supported(qpl_job_ptr, status)) {
+            if (QPL_STS_OK != status && qpl_path_pool != path && job::is_sw_fallback_supported(qpl_job_ptr, status)) {
                 job::update_is_sw_fallback(qpl_job_ptr, true);
             }
         }

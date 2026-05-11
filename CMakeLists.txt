@@ -154,8 +154,26 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake"
 
 SET(QPL_PROJECT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
+if (DEFINED ACC_POOL_PATH)
+    message(STATUS "ACC_POOL_PATH specified: ${ACC_POOL_PATH}. Enabling ACC_POOL_PATH globally.")
+    add_definitions(-DACC_POOL_PATH)
+    include_directories(${ACC_POOL_PATH}/runtime)
+    include_directories(${ACC_POOL_PATH}/include)
+    
+    # Disable pedantic errors because idxd.h uses anonymous structs
+    if (NOT MSVC)
+        add_compile_options(-Wno-pedantic)
+    endif()
+    
+endif()
+
 # Build library
 add_subdirectory(sources)
+
+if (DEFINED ACC_POOL_PATH)
+    # Link against libnuma for the proxy client
+    target_link_libraries(qpl PRIVATE numa)
+endif()
 
 # Build additional components
 # Set of extra options that allows to build only library, or library

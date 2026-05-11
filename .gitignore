@@ -22,3 +22,9 @@ qpl*.rpm
 
 # CMake-generated header file containing version information
 /include/qpl/c_api/project_version.h
+
+# benchmark data
+/examples/benchmarks/data
+
+# vscode
+.code-workspace.code-workspace

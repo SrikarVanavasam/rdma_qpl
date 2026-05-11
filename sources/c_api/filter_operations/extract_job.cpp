@@ -43,6 +43,7 @@ uint32_t perform_extract(qpl_job* job_ptr, uint8_t* buffer_ptr, uint32_t buffer_
     analytics::analytic_operation_result_t extract_result {};
 
     switch (job_ptr->data_ptr.path) {
+        case qpl_path_pool:
         case qpl_path_hardware: {
             auto input_stream = analytics::input_stream_t::builder(src_begin, src_end)
                                         .element_count(job_ptr->num_input_elements)
