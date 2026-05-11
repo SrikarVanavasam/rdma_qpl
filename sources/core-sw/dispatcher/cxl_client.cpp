@@ -294,6 +294,7 @@ bool CxlClient::setup_rdma_proxy(int rdma_port) {
     qp_attr.cap.max_recv_wr = 10;
     qp_attr.cap.max_send_sge = 1;
     qp_attr.cap.max_recv_sge = 1;
+    qp_attr.cap.max_inline_data = 64;
     qp_attr.qp_type = IBV_QPT_RC;
     
     if (rdma_create_qp(id_, pd_, &qp_attr)) return false;
@@ -392,11 +393,13 @@ int CxlClient::rdma_clear_completion(uint32_t slot) {
 #ifdef ACC_POOL_PATH
     if (!rdma_proxy_setup_done_) return -1;
 
+    // Use inline write to send zeros from the stack
+    uint8_t zeros[64] = {0};
     struct ibv_sge sge;
     std::memset(&sge, 0, sizeof(sge));
-    sge.addr = (uint64_t)rdma_comp_buf_ + (slot * 64);
+    sge.addr = (uintptr_t)zeros;
     sge.length = 64;
-    sge.lkey = mr_comp_->lkey;
+    sge.lkey = 0; // Not needed for inline
 
     struct ibv_send_wr wr_write;
     std::memset(&wr_write, 0, sizeof(wr_write));
@@ -404,7 +407,7 @@ int CxlClient::rdma_clear_completion(uint32_t slot) {
     wr_write.opcode = IBV_WR_RDMA_WRITE;
     wr_write.sg_list = &sge;
     wr_write.num_sge = 1;
-    wr_write.send_flags = IBV_SEND_SIGNALED;
+    wr_write.send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
     wr_write.wr.rdma.remote_addr = remote_comp_addr_ + (slot * 64);
     wr_write.wr.rdma.rkey = remote_comp_rkey_;
 

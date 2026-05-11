@@ -442,7 +442,7 @@ qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         int slot = state_ptr->rdma_slot_id;
 
         if (slot >= 0) {
-            hw_completion_record rdma_comp_staging = {};
+            hw_iaa_completion_record rdma_comp_staging = {};
             if (cxl_client.rdma_read_completion(slot, &rdma_comp_staging) != 0) {
                 std::cerr << "[QPL CXL] RDMA READ for completion failed" << std::endl;
                 return QPL_STS_LIBRARY_INTERNAL_ERR;
