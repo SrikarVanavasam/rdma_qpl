@@ -401,7 +401,9 @@ qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         qpl_job_ptr->numa_id == qpl::cxl::QPL_LOCAL_PROXY_UMWAIT_NUMA_ID ||
         qpl_job_ptr->numa_id == qpl::cxl::QPL_CXL_PROXY_NUMA_ID || 
         qpl_job_ptr->numa_id == qpl::cxl::QPL_CXL_PROXY_UMWAIT_NUMA_ID ||
-        qpl_job_ptr->numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID) {
+        qpl_job_ptr->numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID ||
+        qpl_job_ptr->numa_id == qpl::cxl::QPL_COMBINED_CXL_NUMA_ID ||
+        qpl_job_ptr->numa_id == qpl::cxl::QPL_COMBINED_CXL_UMWAIT_NUMA_ID) {
         
         auto& cxl_client = qpl::ml::dispatcher::CxlClient::get_instance();
         int slot = state_ptr->rdma_slot_id;
@@ -410,13 +412,15 @@ qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
             void* slot_ptr = cxl_client.get_comp_ptr(slot);
             if (slot_ptr) {
                 auto* slot_comp = reinterpret_cast<hw_completion_record*>(slot_ptr);
-                
-                // --- Re-apply path-specific optimizations ---
+                static thread_local int poll_count = 0;
+                if (poll_count++ % 1000000 == 0) std::cout << "[QPL CXL] Polling slot=" << slot << " status=" << (int)slot_comp->status << std::endl;
+
                 if (qpl_job_ptr->numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID) {
                     _mm_clflushopt(slot_ptr);
                     _mm_mfence();
                 } else if (qpl_job_ptr->numa_id == qpl::cxl::QPL_CXL_PROXY_UMWAIT_NUMA_ID ||
-                           qpl_job_ptr->numa_id == qpl::cxl::QPL_LOCAL_PROXY_UMWAIT_NUMA_ID) {
+                           qpl_job_ptr->numa_id == qpl::cxl::QPL_LOCAL_PROXY_UMWAIT_NUMA_ID ||
+                           qpl_job_ptr->numa_id == qpl::cxl::QPL_COMBINED_CXL_UMWAIT_NUMA_ID) {
                     _umonitor((void*)&slot_comp->status);
                     if (slot_comp->status == 0) {
                         _umwait(0, __rdtsc() + 10000);

@@ -38,6 +38,8 @@ void print_help() {
     std::cout << "  cxl_umwait     - Remote CXL proxy (umwait)\n";
     std::cout << "  cpu            - Software-mediated CPU proxy\n";
     std::cout << "  rdma           - RDMA network proxy\n";
+    std::cout << "  combined       - Round-robin local + CXL proxy (busy-spin)\n";
+    std::cout << "  combined_umwait - Round-robin local + CXL proxy (umwait)\n";
 }
 
 auto main(int argc, char** argv) -> int {
@@ -57,6 +59,8 @@ auto main(int argc, char** argv) -> int {
     else if (mode == "cxl_umwait") cxl_numa_id = -103;
     else if (mode == "cpu") cxl_numa_id = -104;
     else if (mode == "rdma") cxl_numa_id = -105;
+    else if (mode == "combined") cxl_numa_id = -108;
+    else if (mode == "combined_umwait") cxl_numa_id = -109;
     else {
         std::cerr << "Unknown mode: " << mode << std::endl;
         print_help();
@@ -68,13 +72,18 @@ auto main(int argc, char** argv) -> int {
         std::cout << "Running in mode: " << mode << " (NUMA ID: " << cxl_numa_id << ") on NUMA node: " << numa_node << "\n";
 
         // Initialize CXL Proxy Client
-        qpl_status status = qpl_cxl_initialize(server_ip, "0000:40:00.1", numa_node);
+        std::string final_ip = server_ip;
+        if (mode == "combined" || mode == "combined_umwait") {
+            final_ip = "combined:" + final_ip;
+        }
+
+        qpl_status status = qpl_cxl_initialize(final_ip.c_str(), "0000:40:00.1", numa_node);
         if (status != QPL_STS_OK) {
             std::cout << "Failed to initialize CXL client: " << status << "\n";
             return 1;
         }
 
-        qpl_path_t execution_path = (cxl_numa_id <= -102 && cxl_numa_id >= -107) ? qpl_path_pool : qpl_path_hardware;
+        qpl_path_t execution_path = (cxl_numa_id <= -102 && cxl_numa_id >= -109) ? qpl_path_pool : qpl_path_hardware;
 
         // Get compression buffer size estimate
         const uint32_t compression_size = qpl_get_safe_deflate_compression_buffer_size(source_size);
@@ -100,6 +109,7 @@ auto main(int argc, char** argv) -> int {
         // Library handles completion buffer internal management now, 
         // so we don't need 4096-byte alignment or manual registration here.
         uint8_t* job_buffer = (uint8_t*)numa_alloc_on_node(job_size, numa_node);
+        qpl_cxl_register_buffer(job_buffer, job_size, &iova);
         qpl_job* job = reinterpret_cast<qpl_job*>(job_buffer);
 
         qpl_init_job(execution_path, job);

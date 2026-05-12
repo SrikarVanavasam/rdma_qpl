@@ -22,69 +22,122 @@ namespace qpl::ml::dispatcher {
 
 CxlClient::~CxlClient() {
 #ifdef ACC_POOL_PATH
-    if (ctx_) {
+    if (remote_ctx_ || local_ctx_) {
+        std::lock_guard<std::mutex> lock(map_mutex_);
         // Deregister all mapped buffers
         for (const auto& pair : va_to_handle_map_) {
-            idxd_deregister_buf(idxd_client_get_remote_conn(ctx_), pair.second);
+            if (remote_ctx_) idxd_deregister_buf(idxd_client_get_remote_conn(remote_ctx_), pair.second.remote_handle);
+            if (local_ctx_ && local_ctx_ != remote_ctx_)  
+                idxd_deregister_buf(idxd_client_get_remote_conn(local_ctx_), pair.second.local_handle);
         }
         
-        if (comp_page_) {
-            idxd_deregister_buf(idxd_client_get_remote_conn(ctx_), comp_handle_id_);
-            numa_free(comp_page_, 4096);
+        if (remote_comp_page_) {
+            if (remote_ctx_) idxd_deregister_buf(idxd_client_get_remote_conn(remote_ctx_), remote_comp_handle_id_);
+            numa_free(remote_comp_page_, 4096);
+        }
+        if (local_comp_page_ && local_comp_page_ != remote_comp_page_) {
+            if (local_ctx_)  idxd_deregister_buf(idxd_client_get_remote_conn(local_ctx_), local_comp_handle_id_);
+            numa_free(local_comp_page_, 4096);
         }
 
-        idxd_client_deinit(ctx_);
-        ctx_ = nullptr;
+        if (remote_ctx_) idxd_client_deinit(remote_ctx_);
+        if (local_ctx_ && local_ctx_ != remote_ctx_)  idxd_client_deinit(local_ctx_);
+        
+        remote_ctx_ = nullptr;
+        local_ctx_  = nullptr;
     }
 #endif
 }
 
-bool CxlClient::initialize(const char* server_ip, const char* bdf, int numa_node) {
+bool CxlClient::initialize(const char* server_ip_in, const char* bdf, int numa_node) {
 #ifdef ACC_POOL_PATH
     if (initialized_) return true;
 
-    idxd_client_init_params params = {};
-    params.server_ip = server_ip;
-    params.port = IDXD_REG_DEFAULT_PORT;
-    params.bdf = bdf;
-    params.numa_node = numa_node;
+    std::string server_ip = server_ip_in;
+    bool is_pure_local = (server_ip == "127.0.0.1");
+    bool is_combined   = (server_ip.find("combined:") == 0);
 
-    std::cout << "[QPL CXL] Initializing with server_ip=" << server_ip << ", bdf=" << bdf << ", numa_node=" << numa_node << std::endl;
-    int rc = idxd_client_init(&params, &ctx_);
-    if (rc != 0) {
-        std::cerr << "[QPL CXL] Failed to initialize CXL client, rc=" << rc << std::endl;
-        return false;
+    if (is_combined) {
+        server_ip = server_ip.substr(9); // Strip "combined:"
     }
 
-    // Allocate and register library-managed completion page
-    comp_page_ = numa_alloc_onnode(4096, numa_node);
-    if (!comp_page_) {
-        std::cerr << "[QPL CXL] Failed to allocate completion page" << std::endl;
-        return false;
+    // --- Initialize LOCAL context ---
+    if (is_pure_local || is_combined) {
+        idxd_client_init_params local_params = {};
+        local_params.server_ip = "127.0.0.1";
+        local_params.port = IDXD_REG_DEFAULT_PORT;
+        local_params.bdf = bdf;
+        local_params.numa_node = numa_node;
+
+        std::cout << "[QPL CXL] Initializing LOCAL context with server_ip=127.0.0.1" << std::endl;
+        int rc = idxd_client_init(&local_params, &local_ctx_);
+        if (rc != 0) {
+            std::cerr << "[QPL CXL] Failed to initialize LOCAL context, rc=" << rc << std::endl;
+            if (is_pure_local || is_combined) return false;
+        }
     }
-    memset(comp_page_, 0, 4096);
 
-    int remote_conn = idxd_client_get_remote_conn(ctx_);
-    idxd_reg_result reg_res;
-    memset(&reg_res, 0, sizeof(reg_res));
+    if (is_pure_local) {
+        remote_ctx_ = local_ctx_;
+    } else {
+        // --- Initialize REMOTE context ---
+        idxd_client_init_params remote_params = {};
+        remote_params.server_ip = server_ip.c_str();
+        remote_params.port = IDXD_REG_DEFAULT_PORT;
+        remote_params.bdf = bdf;
+        remote_params.numa_node = numa_node;
 
-    if (idxd_register_completion_buf(remote_conn, comp_page_, 4096, &reg_res) != 0) {
-        std::cerr << "[QPL CXL] Failed to register library-managed completion buffer" << std::endl;
-        numa_free(comp_page_, 4096);
-        comp_page_ = nullptr;
-        return false;
+        std::cout << "[QPL CXL] Initializing REMOTE context with server_ip=" << server_ip << std::endl;
+        int rc = idxd_client_init(&remote_params, &remote_ctx_);
+        if (rc != 0) {
+            std::cerr << "[QPL CXL] Failed to initialize REMOTE context, rc=" << rc << std::endl;
+            return false;
+        }
     }
-    std::cout << "[QPL CXL] Registered completion buffer: iova=0x" << std::hex << reg_res.dma_addr << std::dec << ", handle=" << reg_res.handle_id << std::endl;
 
-    comp_handle_id_ = reg_res.handle_id;
-    comp_pin_handle_id_ = reg_res.pin_handle_id;
-    comp_page_iova_ = reg_res.dma_addr;
+    // --- Allocate and register library-managed completion pages ---
+    
+    // Local page
+    if (local_ctx_) {
+        local_comp_page_ = numa_alloc_onnode(4096, numa_node);
+        if (local_comp_page_) {
+            memset(local_comp_page_, 0, 4096);
+            idxd_reg_result reg_res;
+            memset(&reg_res, 0, sizeof(reg_res));
+            if (idxd_register_completion_buf(idxd_client_get_remote_conn(local_ctx_), local_comp_page_, 4096, &reg_res) == 0) {
+                local_comp_handle_id_ = reg_res.handle_id;
+                local_comp_pin_handle_id_ = reg_res.pin_handle_id;
+                comp_page_local_iova_ = reg_res.dma_addr;
+                std::cout << "[QPL CXL] Registered LOCAL completion page: iova=0x" << std::hex << comp_page_local_iova_ << std::dec << std::endl;
+            }
+        }
+    }
+
+    // Remote page (deduplicate if pure local)
+    if (is_pure_local) {
+        remote_comp_page_ = local_comp_page_;
+        remote_comp_handle_id_ = local_comp_handle_id_;
+        remote_comp_pin_handle_id_ = local_comp_pin_handle_id_;
+        comp_page_remote_iova_ = comp_page_local_iova_;
+    } else if (remote_ctx_) {
+        remote_comp_page_ = numa_alloc_onnode(4096, numa_node);
+        if (remote_comp_page_) {
+            memset(remote_comp_page_, 0, 4096);
+            idxd_reg_result reg_res;
+            memset(&reg_res, 0, sizeof(reg_res));
+            if (idxd_register_completion_buf(idxd_client_get_remote_conn(remote_ctx_), remote_comp_page_, 4096, &reg_res) == 0) {
+                remote_comp_handle_id_ = reg_res.handle_id;
+                remote_comp_pin_handle_id_ = reg_res.pin_handle_id;
+                comp_page_remote_iova_ = reg_res.dma_addr;
+                printf("[QPL CXL] Registered REMOTE completion page: iova=0x%lx, handle=%d\n", comp_page_remote_iova_, remote_comp_handle_id_);
+            }
+        }
+    }
 
     initialized_ = true;
     return true;
 #else
     (void)server_ip; (void)bdf; (void)numa_node;
-    std::cerr << "[QPL CXL] QPL was not compiled with ACC_POOL_PATH support." << std::endl;
     return false;
 #endif
 }
@@ -95,28 +148,73 @@ bool CxlClient::register_buffer(void* buffer, size_t size, uint64_t* out_iova) {
 
     std::lock_guard<std::mutex> lock(map_mutex_);
 
-    // Check if already registered
     if (va_to_iova_map_.find(buffer) != va_to_iova_map_.end()) {
-        if (out_iova) *out_iova = va_to_iova_map_[buffer].iova;
+        RegisteredBuffer& rb = va_to_iova_map_[buffer];
+        RegisteredHandles& rh = va_to_handle_map_[buffer];
+        idxd_reg_result reg_res;
+        
+        if (local_ctx_ && rb.local_iova == 0) {
+            memset(&reg_res, 0, sizeof(reg_res));
+            if (idxd_register_buf(idxd_client_get_remote_conn(local_ctx_), buffer, size, &reg_res) == 0) {
+                rb.local_iova = reg_res.dma_addr;
+                rh.local_handle = reg_res.handle_id;
+            }
+        }
+        if (remote_ctx_ && rb.remote_iova == 0) {
+            if (remote_ctx_ == local_ctx_ && rb.local_iova != 0) {
+                rb.remote_iova = rb.local_iova;
+                rh.remote_handle = rh.local_handle;
+            } else {
+                memset(&reg_res, 0, sizeof(reg_res));
+                if (idxd_register_buf(idxd_client_get_remote_conn(remote_ctx_), buffer, size, &reg_res) == 0) {
+                    rb.remote_iova = reg_res.dma_addr;
+                    rh.remote_handle = reg_res.handle_id;
+                }
+            }
+        }
+        if (out_iova) *out_iova = rb.remote_iova;
         return true;
     }
 
-    int remote_conn = idxd_client_get_remote_conn(ctx_);
-    idxd_reg_result reg_res;
-    memset(&reg_res, 0, sizeof(reg_res));
+    RegisteredBuffer rb = {0, 0, size};
+    RegisteredHandles rh = {0, 0};
 
-    if (idxd_register_buf(remote_conn, buffer, size, &reg_res) != 0) {
-        std::cerr << "[QPL CXL] Failed to register buffer" << std::endl;
-        return false;
+    // Register with LOCAL first
+    idxd_reg_result reg_res;
+    if (local_ctx_) {
+        memset(&reg_res, 0, sizeof(reg_res));
+        if (idxd_register_buf(idxd_client_get_remote_conn(local_ctx_), buffer, size, &reg_res) == 0) {
+            rb.local_iova = reg_res.dma_addr;
+            rh.local_handle = reg_res.handle_id;
+            // printf("[QPL CXL] Registered LOCAL buf %p: iova=0x%lx, handle=%d\n", buffer, rb.local_iova, (int)rh.local_handle);
+        } else {
+            // std::cerr << "[QPL CXL] Failed to register LOCAL buf " << buffer << std::endl;
+        }
     }
 
-    va_to_iova_map_[buffer] = {reg_res.dma_addr, size};
-    va_to_handle_map_[buffer] = reg_res.handle_id;
+    // Handle REMOTE registration
+    if (remote_ctx_) {
+        if (remote_ctx_ == local_ctx_) {
+            rb.remote_iova = rb.local_iova;
+            rh.remote_handle = rh.local_handle;
+        } else {
+            memset(&reg_res, 0, sizeof(reg_res));
+            if (idxd_register_buf(idxd_client_get_remote_conn(remote_ctx_), buffer, size, &reg_res) == 0) {
+                rb.remote_iova = reg_res.dma_addr;
+                rh.remote_handle = reg_res.handle_id;
+                // printf("[QPL CXL] Registered REMOTE buf %p: iova=0x%lx, handle=%d\n", buffer, rb.remote_iova, (int)rh.remote_handle);
+            } else {
+                // std::cerr << "[QPL CXL] Failed to register REMOTE buf " << buffer << std::endl;
+            }
+        }
+    }
 
-    if (out_iova) *out_iova = reg_res.dma_addr;
+    va_to_iova_map_[buffer] = rb;
+    va_to_handle_map_[buffer] = rh;
+
+    if (out_iova) *out_iova = rb.remote_iova;
     return true;
 #else
-    (void)buffer; (void)size; (void)out_iova;
     return false;
 #endif
 }
@@ -128,48 +226,73 @@ bool CxlClient::register_completion_buffer(void* buffer, size_t size, uint64_t* 
     std::lock_guard<std::mutex> lock(map_mutex_);
 
     if (va_to_iova_map_.find(buffer) != va_to_iova_map_.end()) {
-        if (out_iova) *out_iova = va_to_iova_map_[buffer].iova;
+        if (out_iova) *out_iova = va_to_iova_map_[buffer].remote_iova;
         return true;
     }
 
-    int remote_conn = idxd_client_get_remote_conn(ctx_);
-    idxd_reg_result reg_res;
-    memset(&reg_res, 0, sizeof(reg_res));
+    RegisteredBuffer rb = {0, 0, size};
+    RegisteredHandles rh = {0, 0};
 
-    if (idxd_register_completion_buf(remote_conn, buffer, size, &reg_res) != 0) {
-        std::cerr << "[QPL CXL] Failed to register completion buffer" << std::endl;
-        return false;
+    // Register with LOCAL first
+    idxd_reg_result reg_res;
+    if (local_ctx_) {
+        memset(&reg_res, 0, sizeof(reg_res));
+        if (idxd_register_completion_buf(idxd_client_get_remote_conn(local_ctx_), buffer, size, &reg_res) == 0) {
+            rb.local_iova = reg_res.dma_addr;
+            rh.local_handle = reg_res.handle_id;
+            local_comp_handle_id_ = reg_res.handle_id;
+            local_comp_pin_handle_id_ = reg_res.pin_handle_id;
+        }
     }
 
-    comp_handle_id_ = reg_res.handle_id;
-    comp_pin_handle_id_ = reg_res.pin_handle_id;
+    // Handle REMOTE registration (deduplicate if identical to local)
+    if (remote_ctx_ == local_ctx_) {
+        rb.remote_iova = rb.local_iova;
+        rh.remote_handle = rh.local_handle;
+        remote_comp_handle_id_ = local_comp_handle_id_;
+        remote_comp_pin_handle_id_ = local_comp_pin_handle_id_;
+    } else if (remote_ctx_) {
+        memset(&reg_res, 0, sizeof(reg_res));
+        if (idxd_register_completion_buf(idxd_client_get_remote_conn(remote_ctx_), buffer, size, &reg_res) == 0) {
+            rb.remote_iova = reg_res.dma_addr;
+            rh.remote_handle = reg_res.handle_id;
+            remote_comp_handle_id_ = reg_res.handle_id;
+            remote_comp_pin_handle_id_ = reg_res.pin_handle_id;
+        }
+    }
 
-    va_to_iova_map_[buffer] = {reg_res.dma_addr, size};
-    va_to_handle_map_[buffer] = reg_res.handle_id;
+    va_to_iova_map_[buffer] = rb;
+    va_to_handle_map_[buffer] = rh;
 
-    if (out_iova) *out_iova = reg_res.dma_addr;
+    if (out_iova) *out_iova = rb.remote_iova;
     return true;
 #else
-    (void)buffer; (void)size; (void)out_iova;
     return false;
 #endif
 }
 
-bool CxlClient::setup_cxl_proxy() {
+bool CxlClient::setup_cxl_proxy(bool remote) {
 #ifdef ACC_POOL_PATH
-    if (!initialized_ || cxl_proxy_setup_done_) return true;
-    if (comp_handle_id_ == 0) {
-        std::cerr << "[QPL CXL] Cannot setup CXL proxy without a registered completion buffer" << std::endl;
-        return false;
-    }
+    if (!initialized_) return false;
     
-    if (idxd_client_setup_proxy(ctx_, comp_pin_handle_id_, comp_handle_id_) != 0) {
-        std::cerr << "[QPL CXL] Failed to setup CXL proxy" << std::endl;
-        return false;
+    if (remote) {
+        if (cxl_remote_setup_done_) return true;
+        if (!remote_ctx_ || remote_comp_handle_id_ == 0) return false;
+        if (idxd_client_setup_proxy(remote_ctx_, remote_comp_pin_handle_id_, remote_comp_handle_id_) != 0) {
+            return false;
+        }
+        cxl_remote_setup_done_ = true;
+    } else {
+        if (cxl_local_setup_done_) return true;
+        if (!local_ctx_ || local_comp_handle_id_ == 0) return false;
+        if (idxd_client_setup_proxy(local_ctx_, local_comp_pin_handle_id_, local_comp_handle_id_) != 0) {
+            return false;
+        }
+        cxl_local_setup_done_ = true;
     }
-    cxl_proxy_setup_done_ = true;
     return true;
 #else
+    (void)remote;
     return false;
 #endif
 }
@@ -177,21 +300,16 @@ bool CxlClient::setup_cxl_proxy() {
 bool CxlClient::setup_cpu_proxy() {
 #ifdef ACC_POOL_PATH
     if (!initialized_ || cpu_proxy_setup_done_) return true;
-    if (comp_handle_id_ == 0) {
-        std::cerr << "[QPL CXL] Cannot setup CPU proxy without a registered completion buffer" << std::endl;
+    if (remote_comp_handle_id_ == 0) return false;
+
+    if (idxd_client_attach_cpud(remote_ctx_) != 0) {
         return false;
     }
 
-    if (idxd_client_attach_cpud(ctx_) != 0) {
-        std::cerr << "[QPL CXL] Failed to attach cpud" << std::endl;
-        return false;
-    }
-
-    int remote_conn = idxd_client_get_remote_conn(ctx_);
-    uint64_t remote_handle = idxd_client_get_proxy_remote_handle(ctx_);
+    int remote_conn = idxd_client_get_remote_conn(remote_ctx_);
+    uint64_t remote_handle = idxd_client_get_proxy_remote_handle(remote_ctx_);
     
-    if (idxd_remote_cpu_proxy_setup(remote_conn, remote_handle, comp_handle_id_) != 0) {
-        std::cerr << "[QPL CXL] Failed to setup remote CPU proxy" << std::endl;
+    if (idxd_remote_cpu_proxy_setup(remote_conn, remote_handle, remote_comp_handle_id_) != 0) {
         return false;
     }
     cpu_proxy_setup_done_ = true;
@@ -203,29 +321,21 @@ bool CxlClient::setup_cpu_proxy() {
 
 void* CxlClient::map_local_portal(int idxd_id, int wq_id) {
 #ifdef ACC_POOL_PATH
-    if (!initialized_) return nullptr;
+    if (!initialized_ || !local_ctx_) return nullptr;
     if (!local_portal_) {
-        std::cout << "[QPL CXL] Mapping local portal for idxd=" << idxd_id << ", wq=" << wq_id << std::endl;
-        local_portal_ = idxd_client_map_local_portal(ctx_, idxd_id, wq_id);
-        if (!local_portal_) {
-            std::cerr << "[QPL CXL] Failed to map local portal" << std::endl;
-        } else {
-            std::cout << "[QPL CXL] Local portal mapped at " << local_portal_ << std::endl;
-        }
+        local_portal_ = idxd_client_map_local_portal(local_ctx_, idxd_id, wq_id);
     }
     return local_portal_;
 #else
-    (void)idxd_id; (void)wq_id;
     return nullptr;
 #endif
 }
 
 int CxlClient::submit_to_cpud(void* desc) {
 #ifdef ACC_POOL_PATH
-    if (!initialized_ || !desc) return -1;
-    return idxd_client_submit_cpud(ctx_, static_cast<const iax_hw_desc*>(desc));
+    if (!initialized_ || !desc || !remote_ctx_) return -1;
+    return idxd_client_submit_cpud(remote_ctx_, static_cast<const iax_hw_desc*>(desc));
 #else
-    (void)desc;
     return -1;
 #endif
 }
@@ -242,12 +352,12 @@ bool CxlClient::setup_rdma_proxy(int rdma_port) {
 #ifdef ACC_POOL_PATH
     if (rdma_proxy_setup_done_) return true;
 
-    if (!initialized_ || !comp_handle_id_) {
+    if (!initialized_ || !remote_comp_handle_id_) {
         std::cerr << "[QPL CXL] Cannot setup RDMA proxy: client not initialized or completion buffer not registered." << std::endl;
         return false;
     }
 
-    if (idxd_client_setup_proxy(ctx_, comp_pin_handle_id_, comp_handle_id_) != 0) {
+    if (idxd_client_setup_proxy(remote_ctx_, remote_comp_pin_handle_id_, remote_comp_handle_id_) != 0) {
         std::cerr << "[QPL CXL] Failed to setup CXL proxy for RDMA" << std::endl;
         return false;
     }
@@ -269,7 +379,7 @@ bool CxlClient::setup_rdma_proxy(int rdma_port) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(rdma_port);
-    inet_pton(AF_INET, idxd_client_get_server_ip(ctx_), &addr.sin_addr);
+    inet_pton(AF_INET, idxd_client_get_server_ip(remote_ctx_), &addr.sin_addr);
 
     if (rdma_resolve_addr(id_, NULL, (struct sockaddr *)&addr, 2000)) return false;
 
@@ -342,7 +452,8 @@ int CxlClient::rdma_write_descriptor(void* desc) {
     if (!rdma_proxy_setup_done_) return -1;
     
     uint32_t slot = get_next_rdma_slot();
-    void* local_desc = (uint8_t*)rdma_desc_buf_ + (slot * 64);
+    uint32_t normalized_slot = slot % 64;
+    void* local_desc = (uint8_t*)rdma_desc_buf_ + (normalized_slot * 64);
     memcpy(local_desc, desc, 64);
 
     struct ibv_sge sge_desc;
@@ -408,7 +519,7 @@ int CxlClient::rdma_clear_completion(uint32_t slot) {
     wr_write.sg_list = &sge;
     wr_write.num_sge = 1;
     wr_write.send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
-    wr_write.wr.rdma.remote_addr = remote_comp_addr_ + (slot * 64);
+    wr_write.wr.rdma.remote_addr = remote_comp_addr_ + ((slot % 64) * 64);
     wr_write.wr.rdma.rkey = remote_comp_rkey_;
 
     struct ibv_send_wr* bad_wr;
@@ -432,7 +543,8 @@ int CxlClient::rdma_read_completion(uint32_t slot, void* comp_ptr) {
 #ifdef ACC_POOL_PATH
     if (!rdma_proxy_setup_done_ || !comp_ptr) return -1;
     
-    void* local_comp = (uint8_t*)rdma_comp_buf_ + (slot * 64);
+    uint32_t normalized_slot = slot % 64;
+    void* local_comp = (uint8_t*)rdma_comp_buf_ + (normalized_slot * 64);
 
     struct ibv_sge sge_comp;
     std::memset(&sge_comp, 0, sizeof(sge_comp));
@@ -447,7 +559,7 @@ int CxlClient::rdma_read_completion(uint32_t slot, void* comp_ptr) {
     wr_read.sg_list = &sge_comp;
     wr_read.num_sge = 1;
     wr_read.send_flags = IBV_SEND_SIGNALED;
-    wr_read.wr.rdma.remote_addr = remote_comp_addr_ + (slot * 64);
+    wr_read.wr.rdma.remote_addr = remote_comp_addr_ + (normalized_slot * 64);
     wr_read.wr.rdma.rkey = remote_comp_rkey_;
     
     struct ibv_send_wr* bad_wr;
@@ -492,8 +604,8 @@ bool CxlClient::deregister_buffer(void* buffer) {
         return false;
     }
 
-    int remote_conn = idxd_client_get_remote_conn(ctx_);
-    idxd_deregister_buf(remote_conn, it->second);
+    if (remote_ctx_) idxd_deregister_buf(idxd_client_get_remote_conn(remote_ctx_), it->second.remote_handle);
+    if (local_ctx_ && local_ctx_ != remote_ctx_)  idxd_deregister_buf(idxd_client_get_remote_conn(local_ctx_), it->second.local_handle);
 
     va_to_handle_map_.erase(it);
     va_to_iova_map_.erase(buffer);
@@ -505,19 +617,37 @@ bool CxlClient::deregister_buffer(void* buffer) {
 #endif
 }
 
-uint64_t CxlClient::get_iova(void* buffer) {
+uint64_t CxlClient::get_remote_iova(void* buffer) {
     if (!buffer) return 0;
     std::lock_guard<std::mutex> lock(map_mutex_);
     auto it = va_to_iova_map_.find(buffer);
     if (it != va_to_iova_map_.end()) {
-        return it->second.iova;
+        return it->second.remote_iova;
     }
     uintptr_t target = reinterpret_cast<uintptr_t>(buffer);
     for (const auto& pair : va_to_iova_map_) {
         uintptr_t base = reinterpret_cast<uintptr_t>(pair.first);
         size_t size = pair.second.size;
         if (target >= base && target < base + size) {
-            return pair.second.iova + (target - base);
+            return pair.second.remote_iova + (target - base);
+        }
+    }
+    return 0;
+}
+
+uint64_t CxlClient::get_local_iova(void* buffer) {
+    if (!buffer) return 0;
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    auto it = va_to_iova_map_.find(buffer);
+    if (it != va_to_iova_map_.end()) {
+        return it->second.local_iova;
+    }
+    uintptr_t target = reinterpret_cast<uintptr_t>(buffer);
+    for (const auto& pair : va_to_iova_map_) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(pair.first);
+        size_t size = pair.second.size;
+        if (target >= base && target < base + size) {
+            return pair.second.local_iova + (target - base);
         }
     }
     return 0;
@@ -525,8 +655,8 @@ uint64_t CxlClient::get_iova(void* buffer) {
 
 void* CxlClient::get_proxy_portal() const {
 #ifdef ACC_POOL_PATH
-    if (!initialized_) return nullptr;
-    return idxd_client_get_proxy_portal(ctx_);
+    if (!initialized_ || !remote_ctx_) return nullptr;
+    return idxd_client_get_proxy_portal(remote_ctx_);
 #else
     return nullptr;
 #endif
@@ -534,41 +664,83 @@ void* CxlClient::get_proxy_portal() const {
 
 int CxlClient::get_remote_conn() const {
 #ifdef ACC_POOL_PATH
-    if (!initialized_) return -1;
-    return idxd_client_get_remote_conn(ctx_);
+    if (!initialized_ || !remote_ctx_) return -1;
+    return idxd_client_get_remote_conn(remote_ctx_);
 #else
     return -1;
 #endif
 }
 
-int CxlClient::get_comp_slot() {
+int CxlClient::get_comp_slot(bool remote) {
     std::lock_guard<std::mutex> lock(comp_mutex_);
-    for (int i = 0; i < 64; ++i) {
-        if (!(comp_slots_mask_ & (1ULL << i))) {
-            comp_slots_mask_ |= (1ULL << i);
-            // Clear the slot
-            void* ptr = get_comp_ptr(i);
-            if (ptr) memset(ptr, 0, 64);
-            return i;
+    bool use_split_range = (local_ctx_ != nullptr && remote_ctx_ != nullptr && local_ctx_ != remote_ctx_);
+
+    if (remote && use_split_range) {
+        for (int i = 0; i < 64; ++i) {
+            if (!(remote_comp_slots_mask_ & (1ULL << i))) {
+                remote_comp_slots_mask_ |= (1ULL << i);
+                int slot = i + 64; // Remote slots: 64-127
+                memset(get_comp_ptr(slot), 0, 64);
+                return slot;
+            }
+        }
+    } else {
+        // Use 0-63 for local or for remote in non-split mode
+        for (int i = 0; i < 64; ++i) {
+            if (!(local_comp_slots_mask_ & (1ULL << i))) {
+                local_comp_slots_mask_ |= (1ULL << i);
+                int slot = i; // Slots: 0-63
+                memset(get_comp_ptr(slot), 0, 64);
+                return slot;
+            }
         }
     }
     return -1;
 }
 
 void CxlClient::release_comp_slot(int slot) {
-    if (slot < 0 || slot >= 64) return;
+    if (slot < 0 || slot >= 128) return;
     std::lock_guard<std::mutex> lock(comp_mutex_);
-    comp_slots_mask_ &= ~(1ULL << slot);
+    if (slot >= 64) {
+        remote_comp_slots_mask_ &= ~(1ULL << (slot - 64));
+    } else {
+        local_comp_slots_mask_ &= ~(1ULL << slot);
+    }
 }
 
 uint64_t CxlClient::get_comp_iova(int slot) {
-    if (slot < 0 || slot >= 64) return 0;
-    return comp_page_iova_ + (slot * 64);
+    if (slot < 0 || slot >= 128) return 0;
+    bool use_split_range = (local_ctx_ != nullptr && remote_ctx_ != nullptr && local_ctx_ != remote_ctx_);
+
+    if (slot >= 64) {
+        return comp_page_remote_iova_ + ((slot - 64) * 64);
+    } else {
+        // In non-split mode, slot 0-63 could be remote or local
+        if (!use_split_range && remote_ctx_ && !local_ctx_) {
+            return comp_page_remote_iova_ + (slot * 64);
+        }
+        return comp_page_local_iova_ + (slot * 64);
+    }
 }
 
 void* CxlClient::get_comp_ptr(int slot) {
-    if (slot < 0 || slot >= 64 || !comp_page_) return nullptr;
-    return (uint8_t*)comp_page_ + (slot * 64);
+    if (slot < 0 || slot >= 128) return nullptr;
+    bool use_split_range = (local_ctx_ != nullptr && remote_ctx_ != nullptr && local_ctx_ != remote_ctx_);
+
+    void* ptr = nullptr;
+    if (slot >= 64) {
+        if (remote_comp_page_) ptr = (uint8_t*)remote_comp_page_ + ((slot - 64) * 64);
+    } else {
+        // In non-split mode, slot 0-63 could be remote or local
+        if (!use_split_range && remote_comp_page_ && !local_comp_page_) {
+            ptr = (uint8_t*)remote_comp_page_ + (slot * 64);
+        } else if (local_comp_page_) {
+            ptr = (uint8_t*)local_comp_page_ + (slot * 64);
+        }
+    }
+    // static thread_local int count = 0;
+    // if (count++ % 1000000 == 0) printf("[QPL CXL] get_comp_ptr slot=%d -> %p\n", slot, ptr);
+    return ptr;
 }
 
 } // namespace qpl::ml::dispatcher

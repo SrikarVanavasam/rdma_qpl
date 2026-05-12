@@ -207,7 +207,9 @@ hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specifi
         user_specified_numa_id == qpl::cxl::QPL_CXL_PROXY_NUMA_ID || 
         user_specified_numa_id == qpl::cxl::QPL_CXL_PROXY_UMWAIT_NUMA_ID ||
         user_specified_numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID ||
-        user_specified_numa_id == qpl::cxl::QPL_RDMA_PROXY_NUMA_ID) {
+        user_specified_numa_id == qpl::cxl::QPL_RDMA_PROXY_NUMA_ID ||
+        user_specified_numa_id == qpl::cxl::QPL_COMBINED_CXL_NUMA_ID ||
+        user_specified_numa_id == qpl::cxl::QPL_COMBINED_CXL_UMWAIT_NUMA_ID) {
         
         auto& cxl_client = qpl::ml::dispatcher::CxlClient::get_instance();
         if (!cxl_client.is_initialized()) {
@@ -215,12 +217,24 @@ hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specifi
             return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
         }
 
+        // Determine if this specific submission should go to the remote or local IAA.
+        bool is_remote = true;
+        if (user_specified_numa_id == qpl::cxl::QPL_LOCAL_PROXY_NUMA_ID || 
+            user_specified_numa_id == qpl::cxl::QPL_LOCAL_PROXY_UMWAIT_NUMA_ID) {
+            is_remote = false;
+        } else if (user_specified_numa_id == qpl::cxl::QPL_COMBINED_CXL_NUMA_ID ||
+                   user_specified_numa_id == qpl::cxl::QPL_COMBINED_CXL_UMWAIT_NUMA_ID) {
+            static thread_local uint32_t combined_rr_counter = 0;
+            is_remote = (combined_rr_counter++ % 2 != 0);
+        }
+        // CPU, RDMA, and CXL modes are always is_remote = true.
+
         auto* state_ptr = reinterpret_cast<qpl_hw_state*>(desc_ptr);
 
-        // Get a library-managed completion slot
-        int slot = cxl_client.get_comp_slot();
+        // Get a completion slot from the appropriate page (0-63 local, 64-127 remote)
+        int slot = cxl_client.get_comp_slot(is_remote);
         if (slot < 0) {
-            std::cerr << "[QPL CXL] No free completion slots" << std::endl;
+            std::cerr << "[QPL CXL] No free completion slots for " << (is_remote ? "remote" : "local") << " path" << std::endl;
             return HW_ACCELERATOR_WQ_IS_BUSY;
         }
         state_ptr->rdma_slot_id = slot;
@@ -228,33 +242,27 @@ hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specifi
         uint64_t comp_iova = cxl_client.get_comp_iova(slot);
         desc->completion_record_ptr = reinterpret_cast<uint8_t*>(comp_iova);
 
-        // Helper: look up IOVA, auto-registering the buffer if not yet registered.
-        // This handles internal library buffers (e.g. AECS/ccfg) that were never
-        // explicitly registered by the application.
+        // Helper: look up IOVA for the target context
         auto resolve_iova = [&](uint8_t* ptr, uint32_t size) -> uint64_t {
             if (!ptr || size == 0) return 0;
-            uint64_t iova = cxl_client.get_iova(ptr);
+            uint64_t iova = is_remote ? cxl_client.get_remote_iova(ptr) : cxl_client.get_local_iova(ptr);
             if (!iova) {
-                // Auto-register: covers internal buffers like AECS (src2/ccfg)
-                if (!cxl_client.register_buffer(ptr, size, &iova)) {
-                    std::cerr << "[QPL CXL] Auto-register failed for ptr=" << (void*)ptr << std::endl;
-                    return 0;
-                }
+                std::cerr << "[QPL CXL] WARNING: Auto-registering buffer on hot path! ptr=" << (void*)ptr << " size=" << size << std::endl;
+                if (!cxl_client.register_buffer(ptr, size, nullptr)) return 0;
+                iova = is_remote ? cxl_client.get_remote_iova(ptr) : cxl_client.get_local_iova(ptr);
             }
             return iova;
         };
 
-        // Save original VAs so the job can be safely resubmitted without
-        // trying to translate an already-translated IOVA on the next call.
         uint8_t* orig_src1 = desc->src1_ptr;
         uint8_t* orig_src2 = desc->src2_ptr;
         uint8_t* orig_dst  = desc->dst_ptr;
+        uint8_t* orig_comp = desc->completion_record_ptr;
 
-        // Patch descriptor pointers to IOVAs
+        // Patch descriptor pointers to the correct IOVAs
         if (desc->src1_ptr && desc->src1_size > 0) {
             uint64_t iova = resolve_iova(desc->src1_ptr, desc->src1_size);
             if (!iova) {
-                std::cerr << "[QPL CXL] Failed to resolve IOVA for src1=" << (void*)desc->src1_ptr << std::endl;
                 cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
             }
             desc->src1_ptr = reinterpret_cast<uint8_t*>(iova);
@@ -263,8 +271,7 @@ hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specifi
         if (desc->src2_ptr && desc->src2_size > 0) {
             uint64_t iova = resolve_iova(desc->src2_ptr, desc->src2_size);
             if (!iova) {
-                std::cerr << "[QPL CXL] Failed to resolve IOVA for src2=" << (void*)desc->src2_ptr << std::endl;
-                desc->src1_ptr = orig_src1; // restore already-patched field
+                desc->src1_ptr = orig_src1;
                 cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
             }
             desc->src2_ptr = reinterpret_cast<uint8_t*>(iova);
@@ -273,124 +280,73 @@ hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specifi
         if (desc->dst_ptr && desc->max_dst_size > 0) {
             uint64_t iova = resolve_iova(desc->dst_ptr, desc->max_dst_size);
             if (!iova) {
-                std::cerr << "[QPL CXL] Failed to resolve IOVA for dst=" << (void*)desc->dst_ptr << std::endl;
-                desc->src1_ptr = orig_src1;
-                desc->src2_ptr = orig_src2;
+                desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2;
                 cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
             }
             desc->dst_ptr = reinterpret_cast<uint8_t*>(iova);
         }
 
-        // Flush all buffers to physical memory before submission on remote paths.
-        // Remote IAA DMA cannot snoop the CPU cache; the local path is cache-coherent
-        // and does not need explicit flushes.
-        // Evicting these lines also ensures the CPU sees fresh IAA-written data
-        // (e.g. histogram after stats pass) without a separate post-completion flush.
-        const bool is_remote_path =
-            user_specified_numa_id != qpl::cxl::QPL_LOCAL_PROXY_NUMA_ID &&
-            user_specified_numa_id != qpl::cxl::QPL_LOCAL_PROXY_UMWAIT_NUMA_ID;
-        if (is_remote_path) {
+        // --- CACHE FLUSHING FOR REMOTE PATHS ---
+        // We must flush/invalidate caches for all remote-destined buffers 
+        // to ensure the remote IAA hardware sees the latest data and 
+        // that our CPU doesn't see stale data in the destination buffer.
+        if (is_remote) {
+            // printf("[QPL CXL] Flushing buffers: src1=%p size=%u, src2=%p size=%u, dst=%p size=%u\n", 
+            //        (void*)orig_src1, desc->src1_size, (void*)orig_src2, desc->src2_size, (void*)orig_dst, desc->max_dst_size);
             if (orig_src1 && desc->src1_size > 0) {
-                for (uint32_t i = 0; i < desc->src1_size; i += 64)
-                    _mm_clflushopt(orig_src1 + i);
+                for (uint32_t i = 0; i < desc->src1_size; i += 64) _mm_clflushopt(orig_src1 + i);
             }
             if (orig_src2 && desc->src2_size > 0) {
-                for (uint32_t i = 0; i < desc->src2_size; i += 64)
-                    _mm_clflushopt(orig_src2 + i);
+                for (uint32_t i = 0; i < desc->src2_size; i += 64) _mm_clflushopt(orig_src2 + i);
             }
             if (orig_dst && desc->max_dst_size > 0) {
-                for (uint32_t i = 0; i < desc->max_dst_size; i += 64)
-                    _mm_clflushopt(orig_dst + i);
+                for (uint32_t i = 0; i < desc->max_dst_size; i += 64) _mm_clflushopt(orig_dst + i);
             }
-            // Flush the completion slot so IAA sees the zeroed status field.
             void* comp_slot_ptr = cxl_client.get_comp_ptr(slot);
             if (comp_slot_ptr) _mm_clflushopt(comp_slot_ptr);
-            _mm_sfence();
+            _mm_mfence();
         }
 
-        if (user_specified_numa_id == qpl::cxl::QPL_LOCAL_PROXY_NUMA_ID ||
-            user_specified_numa_id == qpl::cxl::QPL_LOCAL_PROXY_UMWAIT_NUMA_ID) {
-
-            void* portal = cxl_client.get_local_portal();
-            if (!portal) {
-                portal = cxl_client.map_local_portal(1, 0);
-                if (!portal) {
-                    std::cerr << "[QPL CXL] Failed to map local portal (idxd=1, wq=0)" << std::endl;
-                    desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
-                    cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
+        // --- Actual Submission ---
+        if (user_specified_numa_id == qpl::cxl::QPL_RDMA_PROXY_NUMA_ID) {
+            if (!cxl_client.setup_rdma_proxy(18516) || cxl_client.rdma_clear_completion(slot) != 0 ||
+                cxl_client.rdma_write_descriptor(desc_ptr) < 0) {
+                desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
+                cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
+            }
+        } else if (user_specified_numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID) {
+            if (!cxl_client.setup_cpu_proxy() || cxl_client.submit_to_cpud(desc_ptr) != 0) {
+                desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
+                cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
+            }
+        } else {
+            if (is_remote) {
+                if (!cxl_client.setup_cxl_proxy(true)) {
+                    std::cerr << "[QPL CXL] Failed to setup REMOTE CXL proxy" << std::endl;
+                }
+            } else {
+                if (!cxl_client.setup_cxl_proxy(false)) {
+                    std::cerr << "[QPL CXL] Failed to setup LOCAL CXL proxy" << std::endl;
+                }
+                if (!cxl_client.get_local_portal()) {
+                    cxl_client.map_local_portal(1, 0);
                 }
             }
-            _movdir64b(portal, desc_ptr);
+            void* portal = is_remote ? cxl_client.get_proxy_portal() : cxl_client.get_local_portal();
 
-        } else if (user_specified_numa_id == qpl::cxl::QPL_CXL_PROXY_NUMA_ID ||
-                   user_specified_numa_id == qpl::cxl::QPL_CXL_PROXY_UMWAIT_NUMA_ID) {
-
-            if (!cxl_client.setup_cxl_proxy()) {
-                std::cerr << "[QPL CXL] Failed setup_cxl_proxy" << std::endl;
-                desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
-                cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
-            }
-
-            void* portal = cxl_client.get_proxy_portal();
             if (!portal) {
-                std::cerr << "[QPL CXL] Proxy portal is null" << std::endl;
+                std::cerr << "[QPL CXL] Portal is null for " << (is_remote ? "remote" : "local") << " path" << std::endl;
                 desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
                 cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
             }
             _movdir64b(portal, desc_ptr);
-
-        } else if (user_specified_numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID) {
-
-            if (!cxl_client.setup_cpu_proxy()) {
-                std::cerr << "[QPL CXL] Failed setup_cpu_proxy" << std::endl;
-                desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
-                cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
-            }
-
-            int submit_rc;
-            do {
-                submit_rc = cxl_client.submit_to_cpud(desc_ptr);
-                if (submit_rc == -EAGAIN) _mm_pause();
-            } while (submit_rc == -EAGAIN);
-            if (submit_rc != 0) {
-                std::cerr << "[QPL CXL] submit_to_cpud failed rc=" << submit_rc << std::endl;
-                desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
-                cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
-            }
-
-        } else if (user_specified_numa_id == qpl::cxl::QPL_RDMA_PROXY_NUMA_ID) {
-
-            if (!cxl_client.setup_rdma_proxy(18516)) {
-                std::cerr << "[QPL CXL] Failed setup_rdma_proxy" << std::endl;
-                desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
-                cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
-            }
-
-            // completion_record_ptr already set to comp_page_iova_ + slot*64 above.
-            // The server's IAA writes to that IOVA (client physical pages mapped via server IOMMU).
-            // We poll by RDMA-READing the server's VA of the same pages (pdata.comp_addr + slot*64)
-            // in hw_check_job rather than reading the local VA directly as CXL does.
-            
-            // RDMA Path: Push zeros to the server's completion slot before submission
-            if (cxl_client.rdma_clear_completion(slot) != 0) {
-                std::cerr << "[QPL CXL] Failed to clear remote completion slot" << std::endl;
-                cxl_client.release_comp_slot(slot);
-                return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
-            }
-
-            // RDMA Path: Submit descriptor
-            if (cxl_client.rdma_write_descriptor(desc_ptr) < 0) {
-                std::cerr << "[QPL CXL] rdma_write_descriptor failed" << std::endl;
-                desc->src1_ptr = orig_src1; desc->src2_ptr = orig_src2; desc->dst_ptr = orig_dst;
-                cxl_client.release_comp_slot(slot); return HW_ACCELERATOR_WORK_QUEUES_NOT_AVAILABLE;
-            }
         }
 
-        // Restore original VA pointers so the job struct is clean for resubmission
-        desc->src1_ptr = orig_src1;
-        desc->src2_ptr = orig_src2;
-        desc->dst_ptr  = orig_dst;
-
+        // Restore original VA pointers for job state consistency
+        desc->src1_ptr = orig_src1; 
+        desc->src2_ptr = orig_src2; 
+        desc->dst_ptr = orig_dst;
+        desc->completion_record_ptr = orig_comp;
         return HW_ACCELERATOR_STATUS_OK;
     }
     // --- END CXL PROXY SUBMISSION LOGIC ---

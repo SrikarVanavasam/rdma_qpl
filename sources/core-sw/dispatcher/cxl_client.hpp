@@ -38,10 +38,12 @@ public:
     bool register_buffer(void* buffer, size_t size, uint64_t* out_iova);
     bool register_completion_buffer(void* buffer, size_t size, uint64_t* out_iova);
     bool deregister_buffer(void* buffer);
-    uint64_t get_iova(void* buffer); // Returns 0 if not found
+    uint64_t get_iova(void* buffer) { return get_remote_iova(buffer); }
+    uint64_t get_remote_iova(void* buffer);
+    uint64_t get_local_iova(void* buffer);
 
     // Proxy Setup (called automatically during first submission based on mode)
-    bool setup_cxl_proxy();
+    bool setup_cxl_proxy(bool remote);
     bool setup_cpu_proxy();
     bool setup_rdma_proxy(int rdma_port);
     void* map_local_portal(int idxd_id, int wq_id);
@@ -52,7 +54,7 @@ public:
     int rdma_read_completion(uint32_t slot, void* comp_ptr);
 
     // Completion Slot management
-    int get_comp_slot();
+    int get_comp_slot(bool remote);
     void release_comp_slot(int slot);
     uint64_t get_comp_iova(int slot);
     void* get_comp_ptr(int slot);
@@ -61,26 +63,33 @@ public:
     void* get_proxy_portal() const;
     void* get_local_portal() const { return local_portal_; }
     int get_remote_conn() const;
-    idxd_client_ctx* get_ctx() const { return ctx_; }
+    idxd_client_ctx* get_remote_ctx() const { return remote_ctx_; }
+    idxd_client_ctx* get_local_ctx() const { return local_ctx_; }
 
 private:
     CxlClient() = default;
     ~CxlClient();
 
-    idxd_client_ctx* ctx_ = nullptr;
+    idxd_client_ctx* remote_ctx_ = nullptr;
+    idxd_client_ctx* local_ctx_  = nullptr;
     bool initialized_ = false;
 
     // Mapping from Virtual Address to IOVA
-    struct RegisteredBuffer { uint64_t iova; size_t size; };
+    struct RegisteredBuffer { uint64_t remote_iova; uint64_t local_iova; size_t size; };
     std::unordered_map<void*, RegisteredBuffer> va_to_iova_map_;
     // Mapping from Virtual Address to handle ID (for deregistration)
-    std::unordered_map<void*, uint64_t> va_to_handle_map_;
+    struct RegisteredHandles { uint64_t remote_handle; uint64_t local_handle; };
+    std::unordered_map<void*, RegisteredHandles> va_to_handle_map_;
     std::mutex map_mutex_;
 
     // Completion buffer specific tracking
-    uint32_t comp_handle_id_ = 0;
-    uint32_t comp_pin_handle_id_ = 0;
-    bool cxl_proxy_setup_done_ = false;
+    uint32_t remote_comp_handle_id_ = 0;
+    uint32_t remote_comp_pin_handle_id_ = 0;
+    uint32_t local_comp_handle_id_ = 0;
+    uint32_t local_comp_pin_handle_id_ = 0;
+    
+    bool cxl_remote_setup_done_ = false;
+    bool cxl_local_setup_done_ = false;
     bool cpu_proxy_setup_done_ = false;
     bool rdma_proxy_setup_done_ = false;
 
@@ -104,10 +113,14 @@ private:
     void* rdma_desc_buf_ = nullptr; // 64 bytes * 32 slots
     void* rdma_comp_buf_ = nullptr; // 4096 bytes
     
-    // Library-managed completion page
-    void* comp_page_ = nullptr;
-    uint64_t comp_page_iova_ = 0;
-    uint64_t comp_slots_mask_ = 0; // 64 slots of 64 bytes each
+    // Library-managed completion pages
+    void* remote_comp_page_ = nullptr;
+    void* local_comp_page_  = nullptr;
+    uint64_t comp_page_remote_iova_ = 0;
+    uint64_t comp_page_local_iova_  = 0;
+    
+    uint64_t remote_comp_slots_mask_ = 0;
+    uint64_t local_comp_slots_mask_  = 0;
     std::mutex comp_mutex_;
 
     int current_rdma_slot_ = 0;
