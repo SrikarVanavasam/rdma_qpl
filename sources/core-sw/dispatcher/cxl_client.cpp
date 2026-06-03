@@ -69,7 +69,7 @@ bool CxlClient::initialize(const char* server_ip_in, const char* bdf, int numa_n
         local_params.bdf = bdf;
         local_params.numa_node = numa_node;
 
-        std::cout << "[QPL CXL] Initializing LOCAL context with server_ip=127.0.0.1" << std::endl;
+        // std::cout << "[QPL CXL] Initializing LOCAL context with server_ip=127.0.0.1" << std::endl;
         int rc = idxd_client_init(&local_params, &local_ctx_);
         if (rc != 0) {
             std::cerr << "[QPL CXL] Failed to initialize LOCAL context, rc=" << rc << std::endl;
@@ -87,7 +87,7 @@ bool CxlClient::initialize(const char* server_ip_in, const char* bdf, int numa_n
         remote_params.bdf = bdf;
         remote_params.numa_node = numa_node;
 
-        std::cout << "[QPL CXL] Initializing REMOTE context with server_ip=" << server_ip << std::endl;
+        // std::cout << "[QPL CXL] Initializing REMOTE context with server_ip=" << server_ip << std::endl;
         int rc = idxd_client_init(&remote_params, &remote_ctx_);
         if (rc != 0) {
             std::cerr << "[QPL CXL] Failed to initialize REMOTE context, rc=" << rc << std::endl;
@@ -108,7 +108,7 @@ bool CxlClient::initialize(const char* server_ip_in, const char* bdf, int numa_n
                 local_comp_handle_id_ = reg_res.handle_id;
                 local_comp_pin_handle_id_ = reg_res.pin_handle_id;
                 comp_page_local_iova_ = reg_res.dma_addr;
-                std::cout << "[QPL CXL] Registered LOCAL completion page: iova=0x" << std::hex << comp_page_local_iova_ << std::dec << std::endl;
+                // std::cout << "[QPL CXL] Registered LOCAL completion page: iova=0x" << std::hex << comp_page_local_iova_ << std::dec << std::endl;
             }
         }
     }
@@ -129,7 +129,7 @@ bool CxlClient::initialize(const char* server_ip_in, const char* bdf, int numa_n
                 remote_comp_handle_id_ = reg_res.handle_id;
                 remote_comp_pin_handle_id_ = reg_res.pin_handle_id;
                 comp_page_remote_iova_ = reg_res.dma_addr;
-                printf("[QPL CXL] Registered REMOTE completion page: iova=0x%lx, handle=%d\n", comp_page_remote_iova_, remote_comp_handle_id_);
+                // printf("[QPL CXL] Registered REMOTE completion page: iova=0x%lx, handle=%d\n", comp_page_remote_iova_, remote_comp_handle_id_);
             }
         }
     }
@@ -137,7 +137,7 @@ bool CxlClient::initialize(const char* server_ip_in, const char* bdf, int numa_n
     initialized_ = true;
     return true;
 #else
-    (void)server_ip; (void)bdf; (void)numa_node;
+    (void)server_ip_in; (void)bdf; (void)numa_node;
     return false;
 #endif
 }
@@ -215,6 +215,9 @@ bool CxlClient::register_buffer(void* buffer, size_t size, uint64_t* out_iova) {
     if (out_iova) *out_iova = rb.remote_iova;
     return true;
 #else
+    (void)buffer;
+    (void)size;
+    (void)out_iova;
     return false;
 #endif
 }
@@ -267,6 +270,9 @@ bool CxlClient::register_completion_buffer(void* buffer, size_t size, uint64_t* 
     if (out_iova) *out_iova = rb.remote_iova;
     return true;
 #else
+    (void)buffer;
+    (void)size;
+    (void)out_iova;
     return false;
 #endif
 }
@@ -327,6 +333,8 @@ void* CxlClient::map_local_portal(int idxd_id, int wq_id) {
     }
     return local_portal_;
 #else
+    (void)idxd_id;
+    (void)wq_id;
     return nullptr;
 #endif
 }
@@ -336,6 +344,7 @@ int CxlClient::submit_to_cpud(void* desc) {
     if (!initialized_ || !desc || !remote_ctx_) return -1;
     return idxd_client_submit_cpud(remote_ctx_, static_cast<const iax_hw_desc*>(desc));
 #else
+    (void)desc;
     return -1;
 #endif
 }

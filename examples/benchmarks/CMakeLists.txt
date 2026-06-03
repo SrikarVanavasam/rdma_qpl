@@ -29,6 +29,8 @@ foreach(source_file ${MICROBENCH_SOURCES})
     endif()
 endforeach()
 
+add_subdirectory(cxl_micro_benchmark)
+
 # End-to-End TPC-H Q6
 set(TPCH_Q6_DIR "end_to_end/tpch_q6")
 
@@ -66,6 +68,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${TPCH_Q6_DIR}/decompression_scan.cpp")
         endif()
         if(NOT LZ4_LIBRARY)
             message(STATUS "  - LZ4 not found")
+        endif()
+    endif()
+endif()
+
+# tpch_q6_cxl_decompression_scan
+set(TPCH_Q6_CXL_DIR "end_to_end/tpch_q6_cxl")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${TPCH_Q6_CXL_DIR}/decompression_scan.cpp")
+    if(ZLIB_FOUND AND LZ4_LIBRARY)
+        add_executable(tpch_q6_cxl_decompression_scan ${TPCH_Q6_CXL_DIR}/decompression_scan.cpp)
+        qpl_set_common_target_settings(tpch_q6_cxl_decompression_scan)
+        target_link_libraries(tpch_q6_cxl_decompression_scan PRIVATE qpl numa ZLIB::ZLIB ${LZ4_LIBRARY})
+        target_include_directories(tpch_q6_cxl_decompression_scan PRIVATE ${LZ4_INCLUDE_DIR} cxl_micro_benchmark)
+        target_compile_features(tpch_q6_cxl_decompression_scan PRIVATE cxx_std_17)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_link_libraries(tpch_q6_cxl_decompression_scan PRIVATE $<$<C_COMPILER_ID:GNU,Clang>:stdc++fs>)
         endif()
     endif()
 endif()

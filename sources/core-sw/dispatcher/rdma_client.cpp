@@ -183,7 +183,7 @@ bool RdmaClient::initialize(const std::string& server_ip, bool enable_odp) {
     remote_config_ = *reinterpret_cast<const rdma::ConnPrivateData*>(event->param.conn.private_data);
     rdma_ack_cm_event(event);
     
-    std::cout << "[RdmaClient] Connected to server with " << remote_config_.num_wqs << " WQ(s)" << std::endl;
+    // std::cout << "[RdmaClient] Connected to server with " << remote_config_.num_wqs << " WQ(s)" << std::endl;
 
     // Allocate local descriptor pool (64-byte aligned)
     // No need to register MR as we use ODP (send_mr_)
@@ -217,7 +217,7 @@ bool RdmaClient::initialize(const std::string& server_ip, bool enable_odp) {
             return false;
         }
     } else {
-        std::cout << "[RdmaClient] Using huge pages for data staging pool" << std::endl;
+        // std::cout << "[RdmaClient] Using huge pages for data staging pool" << std::endl;
     }
     
     // Pin in memory to prevent swapping and ensure consistent performance
@@ -267,9 +267,9 @@ bool RdmaClient::initialize(const std::string& server_ip, bool enable_odp) {
         return false;
     }
 
-    std::cout << "[RdmaClient] Staging pools allocated: Data=" << (rdma::NUM_JOBS * 3 * rdma::BLOCK_SIZE / (1024*1024)) 
-              << "MB, Desc=" << (rdma::NUM_JOBS * rdma::DESC_SIZE / 1024) << "KB, Comp=" 
-              << (rdma::NUM_JOBS * rdma::COMP_SIZE / 1024) << "KB" << std::endl;
+    // std::cout << "[RdmaClient] Staging pools allocated: Data=" << (rdma::NUM_JOBS * 3 * rdma::BLOCK_SIZE / (1024*1024)) 
+    //           << "MB, Desc=" << (rdma::NUM_JOBS * rdma::DESC_SIZE / 1024) << "KB, Comp=" 
+    //           << (rdma::NUM_JOBS * rdma::COMP_SIZE / 1024) << "KB" << std::endl;
 
     std::lock_guard<std::mutex> lock(slot_mutex_);
     // Push in reverse order so stack pops 0, 1, 2... (low slots first for accurate max_active_slot)

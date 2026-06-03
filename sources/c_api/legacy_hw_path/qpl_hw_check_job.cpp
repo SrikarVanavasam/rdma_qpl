@@ -412,8 +412,6 @@ qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
             void* slot_ptr = cxl_client.get_comp_ptr(slot);
             if (slot_ptr) {
                 auto* slot_comp = reinterpret_cast<hw_completion_record*>(slot_ptr);
-                static thread_local int poll_count = 0;
-                if (poll_count++ % 1000000 == 0) std::cout << "[QPL CXL] Polling slot=" << slot << " status=" << (int)slot_comp->status << std::endl;
 
                 if (qpl_job_ptr->numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID) {
                     _mm_clflushopt(slot_ptr);
