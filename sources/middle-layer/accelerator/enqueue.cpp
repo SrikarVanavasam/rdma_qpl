@@ -247,7 +247,7 @@ hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specifi
             if (!ptr || size == 0) return 0;
             uint64_t iova = is_remote ? cxl_client.get_remote_iova(ptr) : cxl_client.get_local_iova(ptr);
             if (!iova) {
-                std::cerr << "[QPL CXL] WARNING: Auto-registering buffer on hot path! ptr=" << (void*)ptr << " size=" << size << std::endl;
+                std::cerr << "[QPL CXL] FATAL WARNING: Buffer bypassed global mempool and hit hot-path registration! ptr=" << (void*)ptr << " size=" << size << std::endl;
                 if (!cxl_client.register_buffer(ptr, size, nullptr)) return 0;
                 iova = is_remote ? cxl_client.get_remote_iova(ptr) : cxl_client.get_local_iova(ptr);
             }
@@ -292,18 +292,23 @@ hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specifi
         // that our CPU doesn't see stale data in the destination buffer.
         if (is_remote) {
             // printf("[QPL CXL] Flushing buffers: src1=%p size=%u, src2=%p size=%u, dst=%p size=%u\n", 
-            //        (void*)orig_src1, desc->src1_size, (void*)orig_src2, desc->src2_size, (void*)orig_dst, desc->max_dst_size);
-            if (orig_src1 && desc->src1_size > 0) {
-                for (uint32_t i = 0; i < desc->src1_size; i += 64) _mm_clflushopt(orig_src1 + i);
-            }
-            if (orig_src2 && desc->src2_size > 0) {
-                for (uint32_t i = 0; i < desc->src2_size; i += 64) _mm_clflushopt(orig_src2 + i);
-            }
-            if (orig_dst && desc->max_dst_size > 0) {
-                for (uint32_t i = 0; i < desc->max_dst_size; i += 64) _mm_clflushopt(orig_dst + i);
-            }
+            auto flush_buffer = [](uint8_t* ptr, uint32_t size) {
+                if (!ptr || size == 0) return;
+                uintptr_t start = reinterpret_cast<uintptr_t>(ptr) & ~63ULL;
+                uintptr_t end = (reinterpret_cast<uintptr_t>(ptr) + size + 63) & ~63ULL;
+                for (uintptr_t addr = start; addr < end; addr += 64) {
+                    _mm_clflushopt(reinterpret_cast<void*>(addr));
+                }
+            };
+
+            flush_buffer(orig_src1, desc->src1_size);
+            flush_buffer(orig_src2, desc->src2_size);
+            flush_buffer(orig_dst, desc->max_dst_size);
             void* comp_slot_ptr = cxl_client.get_comp_ptr(slot);
-            if (comp_slot_ptr) _mm_clflushopt(comp_slot_ptr);
+            if (comp_slot_ptr) {
+                std::memset(comp_slot_ptr, 0, 64);
+                _mm_clflushopt(comp_slot_ptr);
+            }
             _mm_mfence();
         }
 

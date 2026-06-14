@@ -104,12 +104,16 @@ bool CxlClient::initialize(const char* server_ip_in, const char* bdf, int numa_n
             memset(local_comp_page_, 0, 4096);
             idxd_reg_result reg_res;
             memset(&reg_res, 0, sizeof(reg_res));
-            if (idxd_register_completion_buf(idxd_client_get_remote_conn(local_ctx_), local_comp_page_, 4096, &reg_res) == 0) {
+            int rc = idxd_register_completion_buf(idxd_client_get_remote_conn(local_ctx_), local_comp_page_, 4096, &reg_res);
+            if (rc == 0) {
                 local_comp_handle_id_ = reg_res.handle_id;
                 local_comp_pin_handle_id_ = reg_res.pin_handle_id;
                 comp_page_local_iova_ = reg_res.dma_addr;
-                // std::cout << "[QPL CXL] Registered LOCAL completion page: iova=0x" << std::hex << comp_page_local_iova_ << std::dec << std::endl;
+            } else {
+                std::cerr << "[QPL CXL] Failed to register LOCAL completion buf, rc=" << rc << std::endl;
             }
+        } else {
+            std::cerr << "[QPL CXL] Failed to allocate LOCAL completion page" << std::endl;
         }
     }
 
@@ -147,6 +151,19 @@ bool CxlClient::register_buffer(void* buffer, size_t size, uint64_t* out_iova) {
     if (!initialized_ || !buffer) return false;
 
     std::lock_guard<std::mutex> lock(map_mutex_);
+
+    // Check if the requested buffer range falls within any already registered buffer range
+    uintptr_t target = reinterpret_cast<uintptr_t>(buffer);
+    for (const auto& pair : va_to_iova_map_) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(pair.first);
+        size_t rsize = pair.second.size;
+        if (target >= base && (target + size) <= (base + rsize)) {
+            if (out_iova) {
+                *out_iova = pair.second.remote_iova + (target - base);
+            }
+            return true;
+        }
+    }
 
     if (va_to_iova_map_.find(buffer) != va_to_iova_map_.end()) {
         RegisteredBuffer& rb = va_to_iova_map_[buffer];
@@ -290,8 +307,18 @@ bool CxlClient::setup_cxl_proxy(bool remote) {
         cxl_remote_setup_done_ = true;
     } else {
         if (cxl_local_setup_done_) return true;
-        if (!local_ctx_ || local_comp_handle_id_ == 0) return false;
-        if (idxd_client_setup_proxy(local_ctx_, local_comp_pin_handle_id_, local_comp_handle_id_) != 0) {
+        static bool printed_local_setup_fail = false;
+        if (!local_ctx_) {
+            if (!printed_local_setup_fail) { std::cerr << "[QPL CXL] setup_cxl_proxy: local_ctx_ is null" << std::endl; printed_local_setup_fail = true; }
+            return false;
+        }
+        if (local_comp_handle_id_ == 0) {
+            if (!printed_local_setup_fail) { std::cerr << "[QPL CXL] setup_cxl_proxy: local_comp_handle_id_ is 0" << std::endl; printed_local_setup_fail = true; }
+            return false;
+        }
+        int rc = idxd_client_setup_proxy(local_ctx_, local_comp_pin_handle_id_, local_comp_handle_id_);
+        if (rc != 0) {
+            if (!printed_local_setup_fail) { std::cerr << "[QPL CXL] setup_cxl_proxy: idxd_client_setup_proxy failed, rc=" << rc << std::endl; printed_local_setup_fail = true; }
             return false;
         }
         cxl_local_setup_done_ = true;

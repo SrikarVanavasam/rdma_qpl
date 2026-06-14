@@ -33,6 +33,7 @@ endif()
 if (DEFINED ACC_POOL_PATH)
     message(STATUS "ACC_POOL_PATH specified: ${ACC_POOL_PATH}. Linking acc_pool CXL client library.")
     target_sources(qpl PRIVATE ${ACC_POOL_PATH}/runtime/idxd_client.c)
+    target_include_directories(qpl PRIVATE ${ACC_POOL_PATH}/include)
 endif()
 
 target_include_directories(qpl
