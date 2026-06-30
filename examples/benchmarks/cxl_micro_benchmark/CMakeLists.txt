@@ -7,6 +7,7 @@
 set(QPL_CXL_BENCH_SOURCES
     cxl_scan_exact_test.cpp
     cxl_compression_decompression_test.cpp
+    cxl_canned_compression_test.cpp
     cxl_crc64_test.cpp
     cxl_extract_test.cpp
     cxl_decompression_scan.cpp

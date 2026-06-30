@@ -15,6 +15,7 @@
 #include <numaif.h>
 #include <chrono>
 #include <sys/mman.h>
+#include <dlfcn.h>
 
 #include "qpl/qpl.h"
 
@@ -149,8 +150,34 @@ static inline qpl_status init_cxl_bench(const CxlBenchConfig& config) {
         final_ip = "combined:" + final_ip;
     }
 
-    // Using a default device path, should be configurable if needed
-    return qpl_cxl_initialize(final_ip.c_str(), "0000:40:00.1", config.numa_node);
+    qpl_status status = qpl_cxl_initialize(final_ip.c_str(), "0000:40:00.1", config.numa_node);
+    if (status != QPL_STS_OK) return status;
+
+    // Register global CXL mempool SGL segments
+    struct CxlSglEntryLocal { void* va; size_t size; };
+    typedef size_t (*cxl_get_sgl_count_fn)(void);
+    typedef void (*cxl_get_sgl_fn)(CxlSglEntryLocal*);
+
+    cxl_get_sgl_count_fn get_sgl_count = (cxl_get_sgl_count_fn)dlsym(RTLD_DEFAULT, "cxl_mempool_get_sgl_count");
+    cxl_get_sgl_fn get_sgl = (cxl_get_sgl_fn)dlsym(RTLD_DEFAULT, "cxl_mempool_get_sgl");
+
+    if (get_sgl_count && get_sgl) {
+        size_t count = get_sgl_count();
+        std::cout << "[CXL BENCH INIT] Registering " << count << " SGL segment(s)..." << std::endl;
+        std::vector<CxlSglEntryLocal> entries(count);
+        get_sgl(entries.data());
+        for (size_t i = 0; i < count; ++i) {
+            uint64_t iova = 0;
+            qpl_status reg_st = qpl_cxl_register_buffer(entries[i].va, entries[i].size, &iova);
+            std::cout << "[CXL BENCH INIT] Segment " << i << " va=" << entries[i].va 
+                      << " size=" << entries[i].size << " reg_status=" << reg_st 
+                      << " iova=0x" << std::hex << iova << std::dec << std::endl;
+        }
+    } else {
+        std::cout << "[CXL BENCH INIT] dlsym for SGL functions returned NULL!" << std::endl;
+    }
+
+    return QPL_STS_OK;
 }
 
 #endif // QPL_CXL_BENCH_UTILS_HPP_

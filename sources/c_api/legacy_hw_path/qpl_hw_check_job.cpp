@@ -411,7 +411,7 @@ qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         if (slot >= 0) {
             void* slot_ptr = cxl_client.get_comp_ptr(slot);
             if (slot_ptr) {
-                auto* slot_comp = reinterpret_cast<hw_completion_record*>(slot_ptr);
+                auto* slot_comp = reinterpret_cast<hw_iaa_completion_record*>(slot_ptr);
 
                 if (qpl_job_ptr->numa_id == qpl::cxl::QPL_CPU_PROXY_NUMA_ID) {
                     _mm_clflushopt(slot_ptr);
@@ -426,6 +426,14 @@ qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
                 }
 
                 if (slot_comp->status != 0) {
+                    // Invalidate stale CPU cache lines for the destination buffer before reading
+                    if (desc_ptr->dst_ptr && desc_ptr->max_dst_size > 0) {
+                        uint8_t* dst_ptr = const_cast<uint8_t*>(desc_ptr->dst_ptr);
+                        for (uint32_t i = 0; i < desc_ptr->max_dst_size; i += 64) {
+                            _mm_clflushopt(dst_ptr + i);
+                        }
+                        _mm_mfence();
+                    }
                     // Copy result and release slot
                     std::memcpy(comp_ptr, slot_comp, 64);
                     cxl_client.release_comp_slot(slot);
@@ -451,6 +459,14 @@ qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
             }
 
             if (rdma_comp_staging.status != 0) {
+                // Invalidate stale CPU cache lines for the destination buffer before reading
+                if (desc_ptr->dst_ptr && desc_ptr->max_dst_size > 0) {
+                    uint8_t* dst_ptr = const_cast<uint8_t*>(desc_ptr->dst_ptr);
+                    for (uint32_t i = 0; i < desc_ptr->max_dst_size; i += 64) {
+                        _mm_clflushopt(dst_ptr + i);
+                    }
+                    _mm_mfence();
+                }
                 std::memcpy(comp_ptr, &rdma_comp_staging, 64);
                 cxl_client.release_comp_slot(slot);
                 state_ptr->rdma_slot_id = -1;
@@ -518,6 +534,15 @@ qpl_status hw_check_job(qpl_job* qpl_job_ptr) {
         }
 
         if (comp_ptr->status == 0) { return QPL_STS_BEING_PROCESSED; }
+
+        // Invalidate stale CPU cache lines for the destination buffer before reading
+        if (desc_ptr->dst_ptr && desc_ptr->max_dst_size > 0) {
+            uint8_t* dst_ptr = const_cast<uint8_t*>(desc_ptr->dst_ptr);
+            for (uint32_t i = 0; i < desc_ptr->max_dst_size; i += 64) {
+                _mm_clflushopt(dst_ptr + i);
+            }
+            _mm_mfence();
+        }
 
         uint32_t output_size   = comp_ptr->output_size;
         bool     is_stats_pass = (qpl_job_ptr->op == qpl_op_compress) && (ADCF_STATS_MODE & desc_ptr->decomp_flags);

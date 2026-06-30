@@ -122,6 +122,7 @@ private:
     uint64_t remote_comp_slots_mask_ = 0;
     uint64_t local_comp_slots_mask_  = 0;
     std::mutex comp_mutex_;
+    std::mutex setup_mutex_;
 
     int current_rdma_slot_ = 0;
     static constexpr int max_rdma_slots_ = 64;

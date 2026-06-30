@@ -302,7 +302,13 @@ hw_accelerator_status hw_enqueue_descriptor(void* desc_ptr, int32_t user_specifi
             };
 
             flush_buffer(orig_src1, desc->src1_size);
-            flush_buffer(orig_src2, desc->src2_size);
+            // If src2 is the compression AECS (ccfg), flush both elements of the ccfg array (11328 bytes)
+            // since the hardware toggle can select ccfg[1] at offset 5664, beyond the single active size.
+            uint32_t src2_flush_size = desc->src2_size;
+            if (orig_src2 && (desc->src2_size == 0x620 || desc->src2_size == 0x620 + 4096)) {
+                src2_flush_size = 2 * (0x620 + 4096);
+            }
+            flush_buffer(orig_src2, src2_flush_size);
             flush_buffer(orig_dst, desc->max_dst_size);
             void* comp_slot_ptr = cxl_client.get_comp_ptr(slot);
             if (comp_slot_ptr) {

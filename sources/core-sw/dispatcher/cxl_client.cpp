@@ -200,12 +200,21 @@ bool CxlClient::register_buffer(void* buffer, size_t size, uint64_t* out_iova) {
     idxd_reg_result reg_res;
     if (local_ctx_) {
         memset(&reg_res, 0, sizeof(reg_res));
-        if (idxd_register_buf(idxd_client_get_remote_conn(local_ctx_), buffer, size, &reg_res) == 0) {
+        int rc = idxd_register_buf(idxd_client_get_remote_conn(local_ctx_), buffer, size, &reg_res);
+        if (rc == 0) {
             rb.local_iova = reg_res.dma_addr;
             rh.local_handle = reg_res.handle_id;
             // printf("[QPL CXL] Registered LOCAL buf %p: iova=0x%lx, handle=%d\n", buffer, rb.local_iova, (int)rh.local_handle);
         } else {
-            // std::cerr << "[QPL CXL] Failed to register LOCAL buf " << buffer << std::endl;
+            std::string reason = "Unknown error";
+            if (rc == -34) {
+                reason = "Numerical result out of range (ERANGE) - Buffer physical address lies outside the CXL range [cxl_base_addr, cxl_base_addr + cxl_region_size]";
+            } else if (rc == -95) {
+                reason = "Operation not supported (EOPNOTSUPP) - pin_user_pages_fast failed in kernel (exceeded single-call limits or locked memory limit)";
+            } else if (rc == -12) {
+                reason = "Out of memory (ENOMEM)";
+            }
+            std::cerr << "[QPL CXL] Failed to register LOCAL buf " << buffer << " size=" << size << " rc=" << rc << " (" << reason << ")" << std::endl;
         }
     }
 
@@ -298,6 +307,7 @@ bool CxlClient::setup_cxl_proxy(bool remote) {
 #ifdef ACC_POOL_PATH
     if (!initialized_) return false;
     
+    std::lock_guard<std::mutex> lock(setup_mutex_);
     if (remote) {
         if (cxl_remote_setup_done_) return true;
         if (!remote_ctx_ || remote_comp_handle_id_ == 0) return false;
@@ -332,7 +342,9 @@ bool CxlClient::setup_cxl_proxy(bool remote) {
 
 bool CxlClient::setup_cpu_proxy() {
 #ifdef ACC_POOL_PATH
-    if (!initialized_ || cpu_proxy_setup_done_) return true;
+    if (!initialized_) return false;
+    std::lock_guard<std::mutex> lock(setup_mutex_);
+    if (cpu_proxy_setup_done_) return true;
     if (remote_comp_handle_id_ == 0) return false;
 
     if (idxd_client_attach_cpud(remote_ctx_) != 0) {
@@ -355,6 +367,7 @@ bool CxlClient::setup_cpu_proxy() {
 void* CxlClient::map_local_portal(int idxd_id, int wq_id) {
 #ifdef ACC_POOL_PATH
     if (!initialized_ || !local_ctx_) return nullptr;
+    std::lock_guard<std::mutex> lock(setup_mutex_);
     if (!local_portal_) {
         local_portal_ = idxd_client_map_local_portal(local_ctx_, idxd_id, wq_id);
     }
@@ -386,9 +399,11 @@ struct conn_private_data {
 
 bool CxlClient::setup_rdma_proxy(int rdma_port) {
 #ifdef ACC_POOL_PATH
+    if (!initialized_) return false;
+    std::lock_guard<std::mutex> lock(setup_mutex_);
     if (rdma_proxy_setup_done_) return true;
 
-    if (!initialized_ || !remote_comp_handle_id_) {
+    if (!remote_comp_handle_id_) {
         std::cerr << "[QPL CXL] Cannot setup RDMA proxy: client not initialized or completion buffer not registered." << std::endl;
         return false;
     }
